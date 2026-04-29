@@ -276,6 +276,37 @@ namespace gwheel::rtti
             if (aOut) *aOut = true;
         }
 
+        // -------- Capture natives (Phase 5d) --------------------------------
+        //
+        // Bridge between Mod Settings' InputBinding listening UI and
+        // input_bindings::Capture state. The UI calls BeginCapture(typeHint),
+        // polls each frame, and consumes a captured tagged token on the
+        // first qualifying input. typeHint is "button" or "axis"; unknown
+        // values default to "button".
+
+        void BeginCapture(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
+        {
+            RED4ext::CString hint;
+            RED4ext::GetParameter(aFrame, &hint);
+            aFrame->code++;
+            input_bindings::BeginCapture(hint.c_str());
+            if (aOut) *aOut = true;
+        }
+
+        void PollCapturedInput(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, RED4ext::CString* aOut, int64_t)
+        {
+            aFrame->code++;
+            const std::string s = input_bindings::PollLatestCapture();
+            if (aOut) *aOut = RED4ext::CString(s.c_str());
+        }
+
+        void CancelCapture(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
+        {
+            aFrame->code++;
+            input_bindings::CancelCapture();
+            if (aOut) *aOut = true;
+        }
+
         // Map a material CName hash to a baseline road-surface SINE
         // magnitude (0..1). Hashes captured from 2026-04-24 log.
         //
@@ -432,6 +463,15 @@ namespace gwheel::rtti
                            reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&OnWheelMaterial),
                            "Bool", {{ "Int32", "wheelIdx" }, { "CName", "material" }});
 
+            RegisterGlobal(rtti, "GWheel_BeginCapture",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&BeginCapture),
+                           "Bool", {{ "String", "typeHint" }});
+            RegisterGlobal(rtti, "GWheel_PollCapturedInput",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&PollCapturedInput),
+                           "String", {});
+            RegisterGlobal(rtti, "GWheel_CancelCapture",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&CancelCapture),
+                           "Bool", {});
 
             log::Info("[gwheel] native functions registered for redscript");
 

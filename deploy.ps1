@@ -62,7 +62,8 @@ $redsFiles = @(
   "gwheel_reds\gwheel_mount.reds",
   "gwheel_reds\gwheel_events.reds",
   "gwheel_reds\gwheel_surface.reds",
-  "gwheel_reds\gwheel_vehicle_signals.reds"
+  "gwheel_reds\gwheel_vehicle_signals.reds",
+  "gwheel_reds\gwheel_input_provider.reds"
 )
 foreach ($r in $redsFiles) {
   if (-not (Test-Path $r)) { Fail "Missing redscript source: $r" }
@@ -203,6 +204,32 @@ if ($Game) {
   } else {
     Copy-Item -Force $patchedModSettingsDll $modSettingsTarget
     Info "Deployed patched mod_settings.dll -> $modSettingsTarget"
+
+    # Ship the Wolvenkit-packed ModSettings.archive (visual layout edits to
+    # mod_settings_main.inkwidget, etc.) and its .archive.xl companion
+    # (localization registration). Source path is the staging copy that
+    # build.ps1's `mod_settings_archives` CMake target produces from the
+    # Wolvenkit-packed archive at src/wolvenkit/packed/. If the build
+    # target failed (commonly because the user has not clicked Pack Mod
+    # in Wolvenkit yet), the staging file is missing or stale and we warn
+    # rather than silently shipping nothing.
+    $stagedArchive    = Join-Path $repoRoot "vendor\mod_settings\game_dir\red4ext\plugins\mod_settings\ModSettings.archive"
+    $stagedArchiveXl  = Join-Path $repoRoot "vendor\mod_settings\game_dir\red4ext\plugins\mod_settings\ModSettings.archive.xl"
+    $packedArchiveSrc = Join-Path $repoRoot "vendor\mod_settings\src\wolvenkit\packed\archive\pc\mod\ModSettings.archive"
+    if (-not (Test-Path $packedArchiveSrc)) {
+      Warn "No Wolvenkit-packed archive at $packedArchiveSrc. In Wolvenkit: Save All -> Pack Mod, then re-run build.ps1 + deploy.ps1. Skipping archive deploy."
+    } else {
+      if (Test-Path $stagedArchive) {
+        Copy-Item -Force $stagedArchive (Join-Path $modSettingsDir "ModSettings.archive")
+        Info "Deployed ModSettings.archive -> $modSettingsDir\ModSettings.archive"
+      } else {
+        Warn "Wolvenkit-packed archive exists but staged copy is missing at $stagedArchive. Run build.ps1 to refresh staging."
+      }
+      if (Test-Path $stagedArchiveXl) {
+        Copy-Item -Force $stagedArchiveXl (Join-Path $modSettingsDir "ModSettings.archive.xl")
+        Info "Deployed ModSettings.archive.xl -> $modSettingsDir\ModSettings.archive.xl"
+      }
+    }
   }
 
   # Logitech Gaming Software / G HUB runtime check. The Logitech SDK the DLL

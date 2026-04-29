@@ -6,6 +6,7 @@ set(GWHEEL_SOURCES
   src/sources.cpp
   src/vehicle_hook.cpp
   src/input_bindings.cpp
+  src/axis_resolver.cpp
   src/kbd_hook.cpp
   src/config.cpp
   src/rtti.cpp
@@ -26,6 +27,7 @@ set(GWHEEL_HEADERS
   src/vehicle_hook.h
   src/vehicle_physics_ext.h
   src/input_bindings.h
+  src/axis_resolver.h
   src/kbd_hook.h
   src/config.h
   src/rtti.h

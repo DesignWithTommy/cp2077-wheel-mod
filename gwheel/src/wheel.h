@@ -4,13 +4,49 @@
 
 namespace gwheel::wheel
 {
+    // Stable index into Snapshot::axes for each DInput axis. Order is
+    // append-only; saved binding strings reference these names ("wheel-axis:lY"
+    // etc.) so renumbering breaks user configs. The string form is the
+    // user-facing identifier; the enum value is the in-process index.
+    enum Axis : int32_t
+    {
+        Axis_lX = 0,
+        Axis_lY,
+        Axis_lZ,
+        Axis_lRx,
+        Axis_lRy,
+        Axis_lRz,
+        Axis_slider0,
+        Axis_slider1,
+        Axis_kCount
+    };
+
+    // Map "lY" / "slider0" / etc. -> Axis index. Returns Axis_kCount when
+    // the name doesn't match any known axis. Lookup is case-sensitive
+    // because the binding-string vocabulary is fixed.
+    Axis AxisFromName(const char* name);
+    const char* AxisName(Axis a);
+
     // Controller-axis / button / POV snapshot, published each pump tick.
+    //
+    // Phase 5a: the eight DInput axes are exposed by Axis index in `axes[]`
+    // for the new binding-driven resolver path (Phase 5b consumes them via
+    // axis_resolver). The existing scalar fields stay populated with the
+    // hardcoded G923 layout so legacy consumers (vehicle_hook, plugin.cpp's
+    // BuildFrame) keep working until Phase 6 retires the hardcoded mapping.
+    //
+    // Axis sign convention in `axes[]`:
+    //   - Steer-class axes (lX): -1..+1, negative = left.
+    //   - Pedal-class axes (lY, lZ, lRx, lRy, lRz, slider0, slider1):
+    //     0..1, raw DInput pedals are inverted at this layer so 1 = full
+    //     press regardless of which axis a wheel maps the pedal to.
     struct Snapshot
     {
-        float    steer    = 0.f; // -1..+1
-        float    throttle = 0.f; //  0..1
-        float    brake    = 0.f; //  0..1
-        float    clutch   = 0.f; //  0..1
+        float    steer    = 0.f; // -1..+1 (legacy: lX-derived)
+        float    throttle = 0.f; //  0..1  (legacy: lY-derived)
+        float    brake    = 0.f; //  0..1  (legacy: lRz-derived)
+        float    clutch   = 0.f; //  0..1  (legacy: slider0-derived)
+        float    axes[Axis_kCount] = {0};
         uint32_t buttons  = 0;   // bit per button, low 32
         uint16_t pov      = 0xFFFF;
         bool     connected = false;

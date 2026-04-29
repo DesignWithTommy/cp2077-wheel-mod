@@ -305,6 +305,34 @@ public class GWheelSettings extends IScriptable {
   @runtimeProperty("ModSettings.description", "Logs to red4ext/logs/gwheel-*.log.")
   let ffbDebugLogging: Bool = false;
 
+  // ---- TEMP: Phase 3a verification field --------------------------------
+  // Smoke-test the new ModConfigVarInputBinding primitive. Removed during
+  // Phase 7's full settings rewrite. Click to enter listening mode, press
+  // any keyboard key to capture as "keyboard:KEY_NAME". Press "unequip
+  // item" (Backspace by default) to clear the binding.
+  @runtimeProperty("ModSettings.mod", "G-series Wheel")
+  @runtimeProperty("ModSettings.category", "Debug")
+  @runtimeProperty("ModSettings.category.order", "700")
+  @runtimeProperty("ModSettings.displayName", "TEST input binding")
+  @runtimeProperty("ModSettings.description", "Phase 3a smoke test. Click and press a key.")
+  @runtimeProperty("ModSettings.inputBinding", "true")
+  @runtimeProperty("ModSettings.inputBinding.type", "button")
+  let testInputBinding: String = "";
+
+  // Phase 4 axis-filter smoke test. Click to enter listening mode; keyboard
+  // presses should be silently rejected (the listening prompt stays up).
+  // Verifies the bindingType annotation flows from C++ through to the
+  // redscript controller's gating logic. Wheel-axis capture itself depends
+  // on the gwheel input provider arriving in Phase 5.
+  @runtimeProperty("ModSettings.mod", "G-series Wheel")
+  @runtimeProperty("ModSettings.category", "Debug")
+  @runtimeProperty("ModSettings.category.order", "700")
+  @runtimeProperty("ModSettings.displayName", "TEST input binding (axis)")
+  @runtimeProperty("ModSettings.description", "Phase 4 smoke test. Click and try pressing keys; they should be ignored.")
+  @runtimeProperty("ModSettings.inputBinding", "true")
+  @runtimeProperty("ModSettings.inputBinding.type", "axis")
+  let testInputBindingAxis: String = "";
+
   // ---- Listener callbacks (invoked by Mod Settings, NOT cb funcs) --------
 
   public func OnModSettingsChange() -> Void {
@@ -449,5 +477,11 @@ protected cb func OnGameAttached() -> Bool {
     ModSettings.RegisterListenerToModifications(this.m_gwheelSettings);
     this.m_gwheelSettings.Push();
   }
+  // Register the wheel-input provider so the Mod Settings InputBinding
+  // listening UI can reach the gwheel capture natives via
+  // ModSettingsInputProviderRegistry.Get(). The registry is process-wide
+  // (backed by ModSettings.GetInstance(), a native singleton); a single
+  // provider slot, subsequent registrations overwrite.
+  ModSettingsInputProviderRegistry.Set(new GWheelInputProvider());
   return result;
 }

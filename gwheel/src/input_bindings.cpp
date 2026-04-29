@@ -4,6 +4,7 @@
 #include "sources.h"
 #include "kbd_hook.h"
 #include "vehicle_hook.h"
+#include "wheel.h"
 
 #include <RED4ext/RED4ext.hpp>
 #include <RED4ext/RTTISystem.hpp>
@@ -16,8 +17,12 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace gwheel::input_bindings
@@ -363,6 +368,13 @@ namespace gwheel::input_bindings
             /* 36 MenuRight           */ KA(VK_RIGHT,   "MenuRight (Right arrow)"),
         }};
 
+        // Capture mode (Phase 5c). Armed by BeginCapture, polled by
+        // PollLatestCapture. While `armed` is true, OnTick suppresses
+        // normal action dispatch and watches for the first qualifying
+        // input. The captured string lives in `captured` until it is
+        // claimed; PollLatestCapture clears it atomically.
+        enum class CaptureKind : uint8_t { None, Button, Axis };
+
         struct State
         {
             std::mutex              mtx;
@@ -373,6 +385,16 @@ namespace gwheel::input_bindings
             uint32_t                prevButtons = 0;
             DWORD                   prevPov     = 0xFFFFFFFF;
             bool                    havePrev    = false;
+
+            CaptureKind             captureKind = CaptureKind::None;
+            // Buttons / POV at BeginCapture; rising edges relative to this
+            // baseline (rather than the OnTick-rolling prev) are reported.
+            // This lets a wheel button that was already held when capture
+            // started be ignored until release+repress.
+            uint32_t                captureButtonsBase = 0;
+            DWORD                   capturePovBase     = 0xFFFFFFFF;
+            float                   captureAxesBase[wheel::Axis_kCount] = {0};
+            std::string             captured;          // set once, cleared by Poll
         };
 
         State& S() { static State s; return s; }
@@ -712,13 +734,92 @@ namespace gwheel::input_bindings
     void OnTick(const sources::Frame& frame)
     {
         auto& st = S();
-        if (!config::Current().input.enabled) return;
 
         const uint32_t buttons = frame.digital.buttons;
         // digital.pov is the DInput POV raw in the low 16 bits. 0xFFFF = center.
         // We compare directly against direction values (0, 9000, 18000, 27000)
         // which never collide with 0xFFFF.
         const DWORD    pov     = static_cast<DWORD>(frame.digital.pov);
+
+        // Phase 5c: capture-mode handling runs ahead of the action dispatcher
+        // and runs even when input is globally disabled, so the bind-UI can
+        // capture inputs while config.input.enabled is false. While
+        // captureKind != None we suppress dispatch and watch for the first
+        // qualifying transition; once captured we leave the slot armed
+        // until PollLatestCapture / CancelCapture (the UI side closes the
+        // window so subsequent presses don't overwrite the capture).
+        {
+            std::lock_guard lk(st.mtx);
+            if (st.captureKind != CaptureKind::None && st.captured.empty())
+            {
+                if (st.captureKind == CaptureKind::Button)
+                {
+                    // First button bit that's high now AND was low at
+                    // BeginCapture wins. Buttons already held at capture
+                    // start are ignored until release+repress, which we
+                    // model implicitly here by comparing against the base.
+                    const uint32_t rising = buttons & ~st.captureButtonsBase;
+                    if (rising != 0)
+                    {
+                        for (int i = 0; i < 32; ++i)
+                        {
+                            if (rising & (1u << i))
+                            {
+                                char buf[32];
+                                std::snprintf(buf, sizeof(buf), "wheel:%d", i);
+                                st.captured = buf;
+                                break;
+                            }
+                        }
+                    }
+                    if (st.captured.empty() &&
+                        pov != 0xFFFF && pov != 0xFFFFFFFF &&
+                        pov != st.capturePovBase)
+                    {
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "wheel-pov:%lu", static_cast<unsigned long>(pov));
+                        st.captured = buf;
+                    }
+                }
+                else if (st.captureKind == CaptureKind::Axis)
+                {
+                    constexpr float kAxisDeviationThreshold = 0.25f;
+                    const wheel::Snapshot snap = wheel::CurrentSnapshot();
+                    for (int i = 0; i < wheel::Axis_kCount; ++i)
+                    {
+                        const float delta = snap.axes[i] - st.captureAxesBase[i];
+                        if (std::fabs(delta) >= kAxisDeviationThreshold)
+                        {
+                            char buf[64];
+                            std::snprintf(buf, sizeof(buf), "wheel-axis:%s",
+                                          wheel::AxisName(static_cast<wheel::Axis>(i)));
+                            st.captured = buf;
+                            log::InfoF("[gwheel:capture] axis caught: %s (delta=%.2f)",
+                                       buf, delta);
+                            break;
+                        }
+                    }
+                }
+
+                if (!st.captured.empty() && st.captureKind == CaptureKind::Button)
+                {
+                    log::InfoF("[gwheel:capture] button caught: %s", st.captured.c_str());
+                }
+            }
+
+            if (st.captureKind != CaptureKind::None)
+            {
+                // Update edge-prev so the dispatcher resumes cleanly when
+                // capture ends (stale prev would fire spurious edges on
+                // the first tick after capture release).
+                st.prevButtons = buttons;
+                st.prevPov     = pov;
+                st.havePrev    = true;
+                return;
+            }
+        }
+
+        if (!config::Current().input.enabled) return;
 
         if (!st.havePrev)
         {
@@ -777,5 +878,60 @@ namespace gwheel::input_bindings
 
         st.prevButtons = buttons;
         st.prevPov     = pov;
+    }
+
+    void BeginCapture(const char* typeHint)
+    {
+        auto& st = S();
+        const wheel::Snapshot snap = wheel::CurrentSnapshot();
+        std::lock_guard lk(st.mtx);
+        st.captured.clear();
+        if (typeHint && std::strcmp(typeHint, "axis") == 0)
+        {
+            st.captureKind = CaptureKind::Axis;
+        }
+        else
+        {
+            st.captureKind = CaptureKind::Button;
+        }
+        // Latch current state so already-held buttons / already-deflected
+        // axes don't immediately count as a capture.
+        st.captureButtonsBase = snap.buttons;
+        st.capturePovBase     = snap.pov;
+        for (int i = 0; i < wheel::Axis_kCount; ++i)
+            st.captureAxesBase[i] = snap.axes[i];
+        log::InfoF("[gwheel:capture] BeginCapture(%s)",
+                   st.captureKind == CaptureKind::Axis ? "axis" : "button");
+    }
+
+    std::string PollLatestCapture()
+    {
+        auto& st = S();
+        std::lock_guard lk(st.mtx);
+        if (st.captured.empty()) return {};
+        std::string out = st.captured;
+        st.captured.clear();
+        // Disarm capture once a value is delivered; the listening UI is
+        // responsible for re-arming if multi-shot capture is needed.
+        st.captureKind = CaptureKind::None;
+        log::InfoF("[gwheel:capture] PollLatestCapture -> %s", out.c_str());
+        return out;
+    }
+
+    void CancelCapture()
+    {
+        auto& st = S();
+        std::lock_guard lk(st.mtx);
+        if (st.captureKind == CaptureKind::None && st.captured.empty()) return;
+        st.captureKind = CaptureKind::None;
+        st.captured.clear();
+        log::Info("[gwheel:capture] CancelCapture");
+    }
+
+    bool IsCapturing()
+    {
+        auto& st = S();
+        std::lock_guard lk(st.mtx);
+        return st.captureKind != CaptureKind::None;
     }
 }

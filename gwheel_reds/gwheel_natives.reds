@@ -73,3 +73,13 @@ public static native func GWheel_OnVehicleHit(v: ref<VehicleObject>, lateralKick
 // (e.g. `asphalt`, `dirt`, `metal`). C++ logs the transition and
 // eventually drives surface-aware FFB off the category.
 public static native func GWheel_OnWheelMaterial(wheelIdx: Int32, material: CName) -> Bool;
+
+// Capture-mode bridge for Mod Settings' InputBinding listening UI.
+// BeginCapture arms the plugin to watch wheel inputs; PollCapturedInput
+// returns the empty string until a qualifying input arrives, then returns
+// a tagged token like "wheel:5" / "wheel-axis:lY" / "wheel-pov:18000" and
+// disarms in the same call. CancelCapture aborts without committing.
+// typeHint = "button" or "axis"; unknown values default to "button".
+public static native func GWheel_BeginCapture(typeHint: String) -> Bool;
+public static native func GWheel_PollCapturedInput() -> String;
+public static native func GWheel_CancelCapture() -> Bool;

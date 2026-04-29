@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 
 namespace gwheel::input_bindings
 {
@@ -155,4 +156,32 @@ namespace gwheel::input_bindings
     // when V is on foot.
     void OnTick(const sources::Frame& frame);
 
+    // ---------- Capture mode ------------------------------------------------
+    //
+    // Mod Settings' InputBinding primitive (Phase 4) calls these from the
+    // listening UI to capture wheel buttons / axis movement as tagged-
+    // string bindings. While capture is armed, OnTick suppresses normal
+    // action dispatch — pressing a paddle to bind it must NOT also fire
+    // the paddle's currently-bound action.
+    //
+    // Lifecycle (caller-driven):
+    //   1. UI calls BeginCapture("button") or BeginCapture("axis").
+    //   2. Each frame the UI polls PollLatestCapture(); empty string =
+    //      nothing captured yet, non-empty = tagged token (e.g. "wheel:5",
+    //      "wheel-axis:lY", "wheel-pov:18000"). The poll consumes the
+    //      slot atomically.
+    //   3. UI calls CancelCapture() either after PollLatestCapture
+    //      returned a value (cleanup), or because the user pressed cancel
+    //      / clicked elsewhere.
+    //
+    // typeHint values:
+    //   "button" : capture first rising-edge DInput button or POV-direction
+    //              transition. Axis movements are ignored.
+    //   "axis"   : capture first axis whose value deviates from its
+    //              BeginCapture baseline by more than ~0.25. Buttons / POV
+    //              are ignored.
+    void BeginCapture(const char* typeHint);
+    std::string PollLatestCapture();   // empty = nothing yet
+    void CancelCapture();
+    bool IsCapturing();
 }

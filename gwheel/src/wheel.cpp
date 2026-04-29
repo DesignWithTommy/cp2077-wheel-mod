@@ -21,6 +21,36 @@
 
 namespace gwheel::wheel
 {
+    Axis AxisFromName(const char* name)
+    {
+        if (!name) return Axis_kCount;
+        if (std::strcmp(name, "lX")      == 0) return Axis_lX;
+        if (std::strcmp(name, "lY")      == 0) return Axis_lY;
+        if (std::strcmp(name, "lZ")      == 0) return Axis_lZ;
+        if (std::strcmp(name, "lRx")     == 0) return Axis_lRx;
+        if (std::strcmp(name, "lRy")     == 0) return Axis_lRy;
+        if (std::strcmp(name, "lRz")     == 0) return Axis_lRz;
+        if (std::strcmp(name, "slider0") == 0) return Axis_slider0;
+        if (std::strcmp(name, "slider1") == 0) return Axis_slider1;
+        return Axis_kCount;
+    }
+
+    const char* AxisName(Axis a)
+    {
+        switch (a)
+        {
+            case Axis_lX:      return "lX";
+            case Axis_lY:      return "lY";
+            case Axis_lZ:      return "lZ";
+            case Axis_lRx:     return "lRx";
+            case Axis_lRy:     return "lRy";
+            case Axis_lRz:     return "lRz";
+            case Axis_slider0: return "slider0";
+            case Axis_slider1: return "slider1";
+            default:           return "";
+        }
+    }
+
     namespace
     {
         // Normalize a DIJOYSTATE2 LONG axis. The Logi SDK for the G923
@@ -582,6 +612,20 @@ namespace gwheel::wheel
         s.throttle  = NormalizePedal(raw->lY);
         s.brake     = NormalizePedal(raw->lRz);
         s.clutch    = NormalizePedal(raw->rglSlider[0]);
+
+        // Phase 5a: also publish all eight DInput axes by index for the
+        // binding-driven resolver. Steer axis (lX) keeps its -1..+1 sign;
+        // every other axis is normalized as a pedal (0..1, idle->full press)
+        // so the resolver can max() across them without sign-aware code.
+        s.axes[Axis_lX]      = NormalizeSteer(raw->lX);
+        s.axes[Axis_lY]      = NormalizePedal(raw->lY);
+        s.axes[Axis_lZ]      = NormalizePedal(raw->lZ);
+        s.axes[Axis_lRx]     = NormalizePedal(raw->lRx);
+        s.axes[Axis_lRy]     = NormalizePedal(raw->lRy);
+        s.axes[Axis_lRz]     = NormalizePedal(raw->lRz);
+        s.axes[Axis_slider0] = NormalizePedal(raw->rglSlider[0]);
+        s.axes[Axis_slider1] = NormalizePedal(raw->rglSlider[1]);
+
         s.pov       = static_cast<uint16_t>(raw->rgdwPOV[0] & 0xFFFF);
 
         uint32_t bits = 0;
