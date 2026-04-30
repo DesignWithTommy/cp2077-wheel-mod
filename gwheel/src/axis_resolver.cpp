@@ -22,9 +22,9 @@ namespace gwheel::axis_resolver
             return s;
         }
 
-        // Walk one pipe-delimited token at a time. The supplied callback
-        // receives [start, end) for each token. Empty tokens (consecutive
-        // pipes, leading/trailing) are skipped.
+        // Walk one pipe-delimited token at a time. Empty tokens (consecutive
+        // pipes, leading/trailing) are skipped. Multi-binding is now a max-2-
+        // slot system but the pipe walker handles arbitrary count for safety.
         template <typename F>
         void ForEachToken(const std::string& s, F&& fn)
         {
@@ -38,9 +38,8 @@ namespace gwheel::axis_resolver
             }
         }
 
-        // Returns the axis name pointer + length when `tok` is a
-        // `wheel-axis:NAME` token; nullptr otherwise. The returned pointer
-        // is into the source string, NOT a copy.
+        // Returns true if `tok` is a `wheel-axis:NAME` token, copying NAME
+        // into out. False otherwise.
         bool ParseWheelAxis(const char* tok, size_t len, std::string& out)
         {
             constexpr const char prefix[] = "wheel-axis:";
@@ -63,6 +62,13 @@ namespace gwheel::axis_resolver
             st.bindings[actionName] = value;
     }
 
+    void Clear()
+    {
+        auto& st = S();
+        std::lock_guard lk(st.mtx);
+        st.bindings.clear();
+    }
+
     std::string GetBinding(const char* actionName)
     {
         if (!actionName) return {};
@@ -79,8 +85,8 @@ namespace gwheel::axis_resolver
         const std::string binding = GetBinding(actionName);
         if (binding.empty()) return 0.f;
 
-        float result = 0.f;
-        bool  haveSigned = false;
+        float result      = 0.f;
+        bool  haveSigned  = false;
         std::string axisName;
 
         ForEachToken(binding, [&](const char* tok, size_t len) {
@@ -90,6 +96,9 @@ namespace gwheel::axis_resolver
             const float v = snap.axes[a];
             if (mode == Combine::SignedFirst)
             {
+                // First signed source wins (steer should not max() across
+                // sources — left + right paddles bound to steer would pick
+                // the larger absolute deflection regardless of sign).
                 if (!haveSigned)
                 {
                     result = std::clamp(v, -1.f, 1.f);
@@ -98,10 +107,9 @@ namespace gwheel::axis_resolver
             }
             else
             {
-                // UnsignedMax. Negative readings (rare but possible if a
-                // wheel publishes a signed pedal axis) are clamped to 0
-                // before max() so a phantom negative source can't subtract
-                // from a real positive press.
+                // UnsignedMax: pedal-class. Negative reads on a signed pedal
+                // axis are clamped to 0 so a phantom negative source can't
+                // subtract from a real positive press.
                 const float u = std::clamp(v, 0.f, 1.f);
                 if (u > result) result = u;
             }

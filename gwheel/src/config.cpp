@@ -1,6 +1,7 @@
 #include "config.h"
-#include "logging.h"
+#include "axis_resolver.h"
 #include "input_bindings.h"
+#include "logging.h"
 #include "wheel.h"
 
 #include <windows.h>
@@ -13,6 +14,8 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace gwheel::config
 {
@@ -79,7 +82,6 @@ namespace gwheel::config
 
             out << "  \"input\": {\n";
             out << "    \"enabled\": "       << (c.input.enabled ? "true" : "false")       << ",\n";
-            out << "    \"clutchAsBrake\": " << (c.input.clutchAsBrake ? "true" : "false") << ",\n";
             {
                 std::string esc;
                 EscapeJsonTo(esc, c.input.responseCurve);
@@ -126,47 +128,67 @@ namespace gwheel::config
             emitVeh("van", c.van, true);
             out << "  },\n";
 
-            out << "  \"bindings\": [";
-            for (size_t i = 0; i < c.bindings.size(); ++i)
+            // Sort by key so emitted JSON is deterministic across runs;
+            // an unordered_map's iteration order is implementation-defined
+            // and would otherwise produce noisy diffs.
+            std::vector<std::pair<std::string, std::string>> entries(
+                c.actionBindings.begin(), c.actionBindings.end());
+            std::sort(entries.begin(), entries.end());
+
+            out << "  \"actionBindings\": {";
+            for (size_t i = 0; i < entries.size(); ++i)
             {
-                if (i) out << ", ";
-                out << c.bindings[i];
+                out << (i == 0 ? "\n    " : ",\n    ");
+                std::string esc;
+                EscapeJsonTo(esc, entries[i].first);
+                out << esc << ": ";
+                esc.clear();
+                EscapeJsonTo(esc, entries[i].second);
+                out << esc;
             }
-            out << "]\n";
+            if (!entries.empty()) out << "\n  ";
+            out << "}\n";
 
             out << "}\n";
             return out.str();
         }
 
-        // Parse the flat "bindings" array — fixed-length, one int per
-        // PhysicalInput. Missing array or missing elements default to 0
-        // (Action::None) so older config.json files upgrade cleanly.
-        void ParseBindings(const std::string& text, Config& c)
+        // Parse the actionBindings object. Tagged tokens never contain
+        // quote characters, so a naive scan that finds key/value string
+        // pairs between braces is sufficient — no escape-aware parsing
+        // needed. Missing object = empty map (tabula rasa).
+        void ParseActionBindings(const std::string& text, Config& c)
         {
-            c.bindings.fill(0);
-            size_t arr = text.find("\"bindings\"");
-            if (arr == std::string::npos) return;
-            size_t lbrack = text.find('[', arr);
-            if (lbrack == std::string::npos) return;
-            size_t rbrack = text.find(']', lbrack);
-            if (rbrack == std::string::npos) return;
+            c.actionBindings.clear();
+            size_t pos = text.find("\"actionBindings\"");
+            if (pos == std::string::npos) return;
+            size_t lbrace = text.find('{', pos);
+            if (lbrace == std::string::npos) return;
+            size_t rbrace = text.find('}', lbrace);
+            if (rbrace == std::string::npos) return;
 
-            size_t i = lbrack + 1;
-            size_t slot = 0;
-            while (i < rbrack && slot < c.bindings.size())
+            size_t i = lbrace + 1;
+            while (i < rbrace)
             {
-                // Skip whitespace and commas.
-                while (i < rbrack && (text[i] == ' ' || text[i] == '\t' || text[i] == ',' ||
-                                      text[i] == '\n' || text[i] == '\r'))
-                    ++i;
-                if (i >= rbrack) break;
+                while (i < rbrace && text[i] != '"') ++i;
+                if (i >= rbrace) break;
+                size_t kStart = i + 1;
+                size_t kEnd = text.find('"', kStart);
+                if (kEnd == std::string::npos || kEnd >= rbrace) break;
+                std::string key(text, kStart, kEnd - kStart);
 
-                char* endp = nullptr;
-                long val = std::strtol(text.c_str() + i, &endp, 10);
-                if (endp == text.c_str() + i) break; // no digit found
+                size_t colon = text.find(':', kEnd);
+                if (colon == std::string::npos || colon >= rbrace) break;
+                i = colon + 1;
+                while (i < rbrace && text[i] != '"') ++i;
+                if (i >= rbrace) break;
+                size_t vStart = i + 1;
+                size_t vEnd = text.find('"', vStart);
+                if (vEnd == std::string::npos || vEnd >= rbrace) break;
+                std::string val(text, vStart, vEnd - vStart);
 
-                c.bindings[slot++] = static_cast<int32_t>(val);
-                i = static_cast<size_t>(endp - text.c_str());
+                c.actionBindings[std::move(key)] = std::move(val);
+                i = vEnd + 1;
             }
         }
 
@@ -231,7 +253,6 @@ namespace gwheel::config
             ExtractInt   (text, {},         "version",                c.version);
 
             ExtractBool  (text, "input",    "enabled",                c.input.enabled);
-            ExtractBool  (text, "input",    "clutchAsBrake",          c.input.clutchAsBrake);
             ExtractString(text, "input",    "responseCurve",          c.input.responseCurve);
 
             ExtractBool  (text, "ffb",      "enabled",                c.ffb.enabled);
@@ -262,7 +283,7 @@ namespace gwheel::config
             vehExtract("truck", c.truck);
             vehExtract("van", c.van);
 
-            ParseBindings(text, c);
+            ParseActionBindings(text, c);
         }
 
         void SaveLocked(const Config& c)
@@ -290,8 +311,24 @@ namespace gwheel::config
         {
             // Anything that must take effect immediately when config changes.
             log::SetDebugEnabled(c.ffb.debugLogging);
-            input_bindings::ReplaceAll(c.bindings);
             wheel::SetGlobalStrength(std::clamp(c.ffb.torquePct, 0, 100) / 100.f);
+
+            // Mirror the persisted action bindings into both runtime
+            // dispatchers. Clear-then-repopulate handles deletions cleanly:
+            // a key removed from c.actionBindings disappears from both
+            // resolvers on the next Mutate.
+            //
+            // Each entry is fanned out to every dispatcher; each dispatcher
+            // ignores entries it doesn't own (axis_resolver ignores button
+            // tokens, input_bindings ignores axis tokens, both ignore
+            // empty values).
+            axis_resolver::Clear();
+            input_bindings::Clear();
+            for (const auto& kv : c.actionBindings)
+            {
+                axis_resolver::SetBinding(kv.first.c_str(), kv.second.c_str());
+                input_bindings::SetActionBinding(kv.first, kv.second);
+            }
         }
 
         void Publish(const Config& next)
@@ -368,7 +405,6 @@ namespace gwheel::config
     }
 
     void SetInputEnabled(bool v)            { Mutate([&](Config& c){ c.input.enabled = v; }); }
-    void SetClutchAsBrake(bool v)           { Mutate([&](Config& c){ c.input.clutchAsBrake = v; }); }
 
     void SetResponseCurve(std::string_view v)
     {
@@ -396,16 +432,16 @@ namespace gwheel::config
         Mutate([&](Config& c){ c.music.processName = s; });
     }
 
-    void SetInputBinding(int32_t inputId, int32_t action)
+    void SetActionBinding(std::string_view name, std::string_view value)
     {
-        if (inputId < 0 || static_cast<size_t>(inputId) >= Config::kBindingCount)
-        {
-            log::WarnF("[gwheel] SetInputBinding: inputId %d out of range [0..%zu)",
-                       inputId, Config::kBindingCount);
-            return;
-        }
+        if (name.empty()) return;
+        std::string k(name);
+        std::string v(value);
         Mutate([&](Config& c) {
-            c.bindings[static_cast<size_t>(inputId)] = action;
+            if (v.empty())
+                c.actionBindings.erase(k);
+            else
+                c.actionBindings[k] = v;
         });
     }
 }

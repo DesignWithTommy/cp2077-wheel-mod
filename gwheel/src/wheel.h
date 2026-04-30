@@ -29,11 +29,10 @@ namespace gwheel::wheel
 
     // Controller-axis / button / POV snapshot, published each pump tick.
     //
-    // Phase 5a: the eight DInput axes are exposed by Axis index in `axes[]`
-    // for the new binding-driven resolver path (Phase 5b consumes them via
-    // axis_resolver). The existing scalar fields stay populated with the
-    // hardcoded G923 layout so legacy consumers (vehicle_hook, plugin.cpp's
-    // BuildFrame) keep working until Phase 6 retires the hardcoded mapping.
+    // The eight DInput axes are exposed by Axis index in `axes[]`. Consumers
+    // (axis_resolver, the binding-driven button dispatcher) read them by
+    // name via the user's bindings — there are no hardcoded per-device
+    // mappings.
     //
     // Axis sign convention in `axes[]`:
     //   - Steer-class axes (lX): -1..+1, negative = left.
@@ -42,13 +41,9 @@ namespace gwheel::wheel
     //     press regardless of which axis a wheel maps the pedal to.
     struct Snapshot
     {
-        float    steer    = 0.f; // -1..+1 (legacy: lX-derived)
-        float    throttle = 0.f; //  0..1  (legacy: lY-derived)
-        float    brake    = 0.f; //  0..1  (legacy: lRz-derived)
-        float    clutch   = 0.f; //  0..1  (legacy: slider0-derived)
         float    axes[Axis_kCount] = {0};
-        uint32_t buttons  = 0;   // bit per button, low 32
-        uint16_t pov      = 0xFFFF;
+        uint32_t buttons   = 0;   // bit per button, low 32
+        uint16_t pov       = 0xFFFF;
         bool     connected = false;
     };
 

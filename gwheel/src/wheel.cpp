@@ -421,9 +421,6 @@ namespace gwheel::wheel
             st.hasFFB.store(snap.hasFFB, std::memory_order_release);
             st.ready.store(true, std::memory_order_release);
 
-            // Pick the per-wheel button/POV layout based on friendly name.
-            input_bindings::SetDeviceLayout(snap.productName);
-
             if (snap.hasFFB)
             {
                 if (config::Current().handshake.playOnStart)
@@ -607,16 +604,11 @@ namespace gwheel::wheel
 
         Snapshot s;
         s.connected = true;
-        s.steer     = NormalizeSteer(raw->lX);
-        // Classic Logitech pedal mapping via SDK: Y=throttle, Rz=brake, Slider0=clutch.
-        s.throttle  = NormalizePedal(raw->lY);
-        s.brake     = NormalizePedal(raw->lRz);
-        s.clutch    = NormalizePedal(raw->rglSlider[0]);
 
-        // Phase 5a: also publish all eight DInput axes by index for the
-        // binding-driven resolver. Steer axis (lX) keeps its -1..+1 sign;
-        // every other axis is normalized as a pedal (0..1, idle->full press)
-        // so the resolver can max() across them without sign-aware code.
+        // Publish all eight DInput axes by index. Steer axis (lX) keeps
+        // its -1..+1 sign; every other axis is normalized as a pedal
+        // (0..1, idle->full press). The user's action bindings select
+        // which axis drives steer / throttle / brake at runtime.
         s.axes[Axis_lX]      = NormalizeSteer(raw->lX);
         s.axes[Axis_lY]      = NormalizePedal(raw->lY);
         s.axes[Axis_lZ]      = NormalizePedal(raw->lZ);

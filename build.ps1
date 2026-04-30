@@ -81,14 +81,58 @@ if (-not $msNeedBuild) {
 }
 if ($msNeedBuild) {
   Write-Host "Building patched mod_settings.dll (vendor/mod_settings/)..."
+  # The vendored mod_settings cmake project has a post-build step that
+  # copy_if_different's the DLL/PDB into game_dir/ and game_dir_debug/.
+  # If those target directories don't exist (Wolvenkit's pack workflow
+  # sometimes wipes them, fresh clone never created them), the copy
+  # fails MSBuild and the whole build aborts. Pre-create idempotently
+  # so a clean checkout always builds.
+  foreach ($d in @(
+      "vendor\mod_settings\game_dir\red4ext\plugins\mod_settings",
+      "vendor\mod_settings\game_dir_debug\red4ext\plugins\mod_settings")) {
+    if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+  }
   & $cmake -S vendor/mod_settings -B $msBuildDir -A x64
   if ($LASTEXITCODE -ne 0) { throw "mod_settings CMake configure failed." }
   & $cmake --build $msBuildDir --config Release
-  if ($LASTEXITCODE -ne 0) { throw "mod_settings CMake build failed." }
-  if (-not (Test-Path $msDll)) { throw "mod_settings build succeeded but $msDll not found." }
+  # If the post-build copy step fails (e.g. the game_dir target paths
+  # were wiped by an outside step like Wolvenkit's Pack Mod), don't
+  # abort the whole build — as long as the DLL itself was produced,
+  # we can continue and the pack/deploy steps will still run.
+  if (-not (Test-Path $msDll)) { throw "mod_settings build did not produce $msDll." }
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "mod_settings post-build step failed (LASTEXITCODE=$LASTEXITCODE) but $msDll exists; continuing."
+    $LASTEXITCODE = 0
+  }
 } else {
   Write-Host "mod_settings.dll is up to date; skipping mod_settings build."
 }
+
+# Always re-pack the mod_settings packed.reds bundle. The cmake REDSCRIPT
+# target is supposed to handle this automatically, but its incremental-
+# build heuristic misses redscript edits in some cases (and the manual
+# bash invocation of PackFiles.cmake mangles `//` to `/` via msys path
+# conversion, producing malformed comment headers that fail compilation
+# in-game). Running PackFiles via PowerShell with an explicitly quoted
+# COMMENT_SLUG sidesteps both issues.
+$msPackedReds = (Resolve-Path "vendor\mod_settings\build").ProviderPath + "\staging\packed.reds"
+$msPackScript = (Resolve-Path "vendor\mod_settings\deps\cpcmake\scripts\PackFiles.cmake" -ErrorAction SilentlyContinue)
+$msPackHeader = (Resolve-Path "vendor\mod_settings\deps\cpcmake\files\Header.txt" -ErrorAction SilentlyContinue)
+$msPackSearch = (Resolve-Path "vendor\mod_settings\src\redscript" -ErrorAction SilentlyContinue)
+if ($msPackScript -and $msPackHeader -and $msPackSearch) {
+  Write-Host "Packing mod_settings redscript bundle..."
+  $packedDir = Split-Path $msPackedReds -Parent
+  if (-not (Test-Path $packedDir)) { New-Item -ItemType Directory -Force -Path $packedDir | Out-Null }
+  & $cmake "-DCOMMENT_SLUG=//" "-DHEADER_FILE=$($msPackHeader.ProviderPath)" "-DPACKED_FILE=$msPackedReds" "-DGLOB_EXT=reds" "-DSEARCH_FOLDER=$($msPackSearch.ProviderPath)" -P $msPackScript.ProviderPath | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "mod_settings packed.reds generation failed." }
+  if (-not (Test-Path $msPackedReds)) { throw "mod_settings packed.reds expected at $msPackedReds but missing." }
+}
+
+# Note: ModSettings.archive (the inkwidget pack output) is NOT regenerated
+# from this script. The Wolvenkit CLI's pack and convert paths produce
+# binaries that aren't equivalent to Wolvenkit GUI's "Pack Project" output
+# and break the in-game .inkmenu integration. Pack via the GUI; deploy.ps1
+# reads the archive from src/wolvenkit/packed/archive/pc/mod/ directly.
 
 # ---------- gwheel.dll -----------------------------------------------------
 

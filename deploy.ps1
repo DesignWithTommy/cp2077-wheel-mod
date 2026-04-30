@@ -205,29 +205,45 @@ if ($Game) {
     Copy-Item -Force $patchedModSettingsDll $modSettingsTarget
     Info "Deployed patched mod_settings.dll -> $modSettingsTarget"
 
+    # Ship the patched mod_settings packed.reds (our fork's redscript-side
+    # changes — InputBinding primitive, InputBindingDisplay resolver, the
+    # listening UI capture loop). Built by build.ps1 / the manual
+    # PackFiles.cmake step. Without this copy, redscript-side fixes never
+    # reach the game (mod_settings.dll is C++ only and the user's existing
+    # packed.reds from upstream stays in place).
+    $patchedModSettingsReds = Join-Path $repoRoot "vendor\mod_settings\build\staging\packed.reds"
+    if (Test-Path $patchedModSettingsReds) {
+      Copy-Item -Force $patchedModSettingsReds (Join-Path $modSettingsDir "packed.reds")
+      Info "Deployed patched mod_settings packed.reds -> $modSettingsDir\packed.reds"
+    } else {
+      Warn "No staged packed.reds at $patchedModSettingsReds. Run build.ps1 (or manually invoke vendor/mod_settings/deps/cpcmake/scripts/PackFiles.cmake) before deploy."
+    }
+
     # Ship the Wolvenkit-packed ModSettings.archive (visual layout edits to
     # mod_settings_main.inkwidget, etc.) and its .archive.xl companion
-    # (localization registration). Source path is the staging copy that
-    # build.ps1's `mod_settings_archives` CMake target produces from the
-    # Wolvenkit-packed archive at src/wolvenkit/packed/. If the build
-    # target failed (commonly because the user has not clicked Pack Mod
-    # in Wolvenkit yet), the staging file is missing or stale and we warn
-    # rather than silently shipping nothing.
-    $stagedArchive    = Join-Path $repoRoot "vendor\mod_settings\game_dir\red4ext\plugins\mod_settings\ModSettings.archive"
-    $stagedArchiveXl  = Join-Path $repoRoot "vendor\mod_settings\game_dir\red4ext\plugins\mod_settings\ModSettings.archive.xl"
-    $packedArchiveSrc = Join-Path $repoRoot "vendor\mod_settings\src\wolvenkit\packed\archive\pc\mod\ModSettings.archive"
+    # (localization registration).
+    #
+    # Read directly from src/wolvenkit/packed/, NOT from the game_dir/
+    # staging copy. The staging copy is populated by mod_settings's CMake
+    # post-build target, which silently fails (LASTEXITCODE=1, swallowed
+    # by build.ps1) whenever Wolvenkit's "Pack Mod" path doesn't match
+    # what CMake expects. Reading from packed/ removes one layer of
+    # silent staleness — when the user clicks "Pack Mod" in the Wolvenkit
+    # GUI, the next deploy picks it up directly. The .archive.xl source
+    # is the authored file at src/archiveXL/, which Wolvenkit's pack also
+    # copies into game_dir/ but we don't need that hop.
+    $packedArchiveSrc   = Join-Path $repoRoot "vendor\mod_settings\src\wolvenkit\packed\archive\pc\mod\ModSettings.archive"
+    $packedArchiveXlSrc = Join-Path $repoRoot "vendor\mod_settings\src\archiveXL\ModSettings.archive.xl"
     if (-not (Test-Path $packedArchiveSrc)) {
-      Warn "No Wolvenkit-packed archive at $packedArchiveSrc. In Wolvenkit: Save All -> Pack Mod, then re-run build.ps1 + deploy.ps1. Skipping archive deploy."
+      Warn "No Wolvenkit-packed archive at $packedArchiveSrc. In Wolvenkit: open ModSettings.cpmodproj, then click Pack Project on the toolbar. Skipping archive deploy."
     } else {
-      if (Test-Path $stagedArchive) {
-        Copy-Item -Force $stagedArchive (Join-Path $modSettingsDir "ModSettings.archive")
-        Info "Deployed ModSettings.archive -> $modSettingsDir\ModSettings.archive"
-      } else {
-        Warn "Wolvenkit-packed archive exists but staged copy is missing at $stagedArchive. Run build.ps1 to refresh staging."
-      }
-      if (Test-Path $stagedArchiveXl) {
-        Copy-Item -Force $stagedArchiveXl (Join-Path $modSettingsDir "ModSettings.archive.xl")
+      Copy-Item -Force $packedArchiveSrc (Join-Path $modSettingsDir "ModSettings.archive")
+      Info "Deployed ModSettings.archive -> $modSettingsDir\ModSettings.archive"
+      if (Test-Path $packedArchiveXlSrc) {
+        Copy-Item -Force $packedArchiveXlSrc (Join-Path $modSettingsDir "ModSettings.archive.xl")
         Info "Deployed ModSettings.archive.xl -> $modSettingsDir\ModSettings.archive.xl"
+      } else {
+        Warn "Authored .archive.xl missing at $packedArchiveXlSrc; skipping."
       }
     }
   }

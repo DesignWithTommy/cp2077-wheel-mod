@@ -1,16 +1,15 @@
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 namespace gwheel::config
 {
     struct Input
     {
         bool        enabled = true;
-        bool        clutchAsBrake = false;
         std::string responseCurve = "default"; // default | subdued | sharp
     };
 
@@ -94,7 +93,7 @@ namespace gwheel::config
 
     struct Config
     {
-        int32_t     version = 4;
+        int32_t     version = 5;
         Input       input;
         Ffb         ffb;
         Handshake   handshake;
@@ -105,12 +104,13 @@ namespace gwheel::config
         PerVehicle  truck      = { 0.8f, 40 };
         PerVehicle  van        = { 0.9f, 30 };
 
-        // Per-physical-input action binding. Indexed by input_bindings::
-        // PhysicalInput; value is input_bindings::Action as int32_t. Array
-        // size is hardcoded at 20 to match PhysicalInput::kCount. Keep in
-        // sync if we add wheel controls.
-        static constexpr size_t kBindingCount = 20;
-        std::array<int32_t, kBindingCount> bindings{};
+        // Action-keyed binding strings. Key is an action name
+        // ("SteerAxis", "ThrottleAxis", "BrakeAxis", "Horn", ...);
+        // value is a `|`-delimited list of tagged tokens emitted by the
+        // Mod Settings InputBinding primitive (e.g. "wheel-axis:lY",
+        // "wheel:5|keyboard:KEY_H"). Empty string = unbound. Tabula-rasa
+        // on first launch — no migration of v4 `bindings[]`.
+        std::unordered_map<std::string, std::string> actionBindings;
     };
 
     // Read the published snapshot. Non-blocking; safe from any thread.
@@ -128,7 +128,6 @@ namespace gwheel::config
     // Per-field setters. Each one swaps the snapshot atomically and writes
     // the updated config back to disk.
     void SetInputEnabled(bool v);
-    void SetClutchAsBrake(bool v);
     void SetResponseCurve(std::string_view v);
 
     void SetFfbEnabled(bool v);
@@ -146,7 +145,9 @@ namespace gwheel::config
 
     void SetMusicProcessName(std::string_view v);
 
-    // Single-input binding: inputId in [0, kBindingCount), action as the
-    // Action int from input_bindings.h.
-    void SetInputBinding(int32_t inputId, int32_t action);
+    // Action binding setter. `name` is the action key (e.g. "SteerAxis");
+    // `value` is the delimited tagged-token string from the InputBinding
+    // primitive. Empty value erases the entry. Persists to config.json
+    // and pushes the new binding into axis_resolver immediately.
+    void SetActionBinding(std::string_view name, std::string_view value);
 }

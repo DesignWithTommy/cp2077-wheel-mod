@@ -2,6 +2,7 @@
 #include "logging.h"
 #include "wheel.h"
 #include "sources.h"
+#include "axis_resolver.h"
 #include "input_bindings.h"
 #include "vehicle_hook.h"
 #include "kbd_hook.h"
@@ -12,7 +13,6 @@
 #include "led.h"
 #include "mod_settings_seed.h"
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -25,27 +25,21 @@ namespace gwheel
         std::thread       g_pumpThread;
 
         // Convert the Logi SDK's wheel::Snapshot into the canonical
-        // sources::Frame that the rest of the plugin consumes. Today this
-        // is a straight field copy; if we move buttons+POV to RawInput
-        // later, this becomes the merge point between the two readers.
+        // sources::Frame that the rest of the plugin consumes. Steering /
+        // throttle / brake are routed through axis_resolver against the
+        // user's configured action bindings. An unbound action resolves
+        // to 0, which means a fresh install with empty actionBindings
+        // produces a still wheel and dead pedals until the user binds
+        // them via Mod Settings.
         sources::Frame BuildFrame(const wheel::Snapshot& s)
         {
             sources::Frame f;
             f.connected       = s.connected;
-            f.axes.steer      = s.steer;
-            f.axes.throttle   = s.throttle;
-            f.axes.brake      = s.brake;
-            f.axes.clutch     = s.clutch;
+            f.axes.steer      = axis_resolver::Resolve("SteerAxis",    s, axis_resolver::Combine::SignedFirst);
+            f.axes.throttle   = axis_resolver::Resolve("ThrottleAxis", s, axis_resolver::Combine::UnsignedMax);
+            f.axes.brake      = axis_resolver::Resolve("BrakeAxis",    s, axis_resolver::Combine::UnsignedMax);
             f.digital.buttons = s.buttons;
             f.digital.pov     = s.pov;
-
-            // Clutch-as-brake: the G923's brake pedal is physically stiff; the
-            // softer clutch pedal is easier to modulate. CP2077 has no manual
-            // transmission so the clutch axis is otherwise ignored. When the
-            // toggle is on, whichever pedal is pressed deeper drives braking.
-            if (config::Current().input.clutchAsBrake)
-                f.axes.brake = std::max(f.axes.brake, f.axes.clutch);
-
             return f;
         }
 

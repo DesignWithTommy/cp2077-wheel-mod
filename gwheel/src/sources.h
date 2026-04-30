@@ -18,7 +18,6 @@ namespace gwheel::sources
         float steer    = 0.f;  // -1..+1, negative = left
         float throttle = 0.f;  //  0..1
         float brake    = 0.f;  //  0..1
-        float clutch   = 0.f;  //  0..1
     };
 
     struct DigitalFrame

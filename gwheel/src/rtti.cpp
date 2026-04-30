@@ -14,6 +14,7 @@
 
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 namespace gwheel::rtti
 {
@@ -176,16 +177,34 @@ namespace gwheel::rtti
             if (aOut) *aOut = true;
         }
 
-        // -------- Input bindings --------------------------------------------
+        // -------- Action bindings -------------------------------------------
 
-        void SetInputBinding(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
+        void SetActionBinding(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
         {
-            int32_t inputId = -1;
-            int32_t action = 0;
-            RED4ext::GetParameter(aFrame, &inputId);
-            RED4ext::GetParameter(aFrame, &action);
+            RED4ext::CString name;
+            RED4ext::CString value;
+            RED4ext::GetParameter(aFrame, &name);
+            RED4ext::GetParameter(aFrame, &value);
             aFrame->code++;
-            config::SetInputBinding(inputId, action);
+            config::SetActionBinding(
+                std::string_view(name.c_str()),
+                std::string_view(value.c_str()));
+            if (aOut) *aOut = true;
+        }
+
+        // -------- Redscript log forwarder -----------------------------------
+        //
+        // Bridges redscript-side diagnostic strings into the gwheel-*.log
+        // file. CP2077's native LogChannel writes to a debug channel that
+        // has no sink in retail builds, so we route via the existing
+        // spdlog logger that gwheel already uses for its C++ output.
+
+        void LogPair(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
+        {
+            RED4ext::CString msg;
+            RED4ext::GetParameter(aFrame, &msg);
+            aFrame->code++;
+            gwheel::log::Info(msg.c_str());
             if (aOut) *aOut = true;
         }
 
@@ -399,10 +418,6 @@ namespace gwheel::rtti
             RegisterGlobal(rtti, "GWheel_SetInputEnabled",
                            reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetInputEnabled),
                            "Bool", {{ "Bool", "v" }});
-            RegisterGlobal(rtti, "GWheel_SetClutchAsBrake",
-                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetBool<&config::SetClutchAsBrake>),
-                           "Bool", {{ "Bool", "v" }});
-
             RegisterGlobal(rtti, "GWheel_SetFfbEnabled",
                            reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetBool<&config::SetFfbEnabled>),
                            "Bool", {{ "Bool", "v" }});
@@ -434,9 +449,13 @@ namespace gwheel::rtti
                            reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetBool<&config::SetLedVisualizerWhileMusic>),
                            "Bool", {{ "Bool", "v" }});
 
-            RegisterGlobal(rtti, "GWheel_SetInputBinding",
-                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetInputBinding),
-                           "Bool", {{ "Int32", "inputId" }, { "Int32", "action" }});
+            RegisterGlobal(rtti, "GWheel_SetActionBinding",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetActionBinding),
+                           "Bool", {{ "String", "name" }, { "String", "value" }});
+
+            RegisterGlobal(rtti, "GWheel_Log",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&LogPair),
+                           "Bool", {{ "String", "msg" }});
 
             RegisterGlobal(rtti, "GWheel_SetPlayerVehicle",
                            reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetPlayerVehicle),
