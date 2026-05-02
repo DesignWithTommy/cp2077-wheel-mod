@@ -95,7 +95,10 @@ namespace gwheel::config
             out << "    \"torquePct\": "               << c.ffb.torquePct                              << ",\n";
             out << "    \"stationaryThresholdMps\": "  << c.ffb.stationaryThresholdMps                 << ",\n";
             out << "    \"yawFeedbackPct\": "          << c.ffb.yawFeedbackPct                         << ",\n";
-            out << "    \"activeTorqueStrengthPct\": " << c.ffb.activeTorqueStrengthPct                << "\n";
+            out << "    \"activeTorqueStrengthPct\": " << c.ffb.activeTorqueStrengthPct                << ",\n";
+            out << "    \"invertDirection\": "         << (c.ffb.invertDirection ? "true" : "false")   << ",\n";
+            out << "    \"outputSignFlip\": "          << (c.ffb.outputSignFlip ? "true" : "false")    << ",\n";
+            out << "    \"useSpring\": "               << (c.ffb.useSpring ? "true" : "false")         << "\n";
             out << "  },\n";
 
             out << "  \"handshake\": {\n";
@@ -261,6 +264,9 @@ namespace gwheel::config
             ExtractFloat (text, "ffb",      "stationaryThresholdMps", c.ffb.stationaryThresholdMps);
             ExtractInt   (text, "ffb",      "yawFeedbackPct",         c.ffb.yawFeedbackPct);
             ExtractInt   (text, "ffb",      "activeTorqueStrengthPct", c.ffb.activeTorqueStrengthPct);
+            ExtractBool  (text, "ffb",      "invertDirection",        c.ffb.invertDirection);
+            ExtractBool  (text, "ffb",      "outputSignFlip",         c.ffb.outputSignFlip);
+            ExtractBool  (text, "ffb",      "useSpring",              c.ffb.useSpring);
 
             // "handshake" is the current key. Older config.json files from
             // pre-rename installs used "hello" for the same field; read
@@ -420,6 +426,9 @@ namespace gwheel::config
     void SetStationaryThresholdMps(float v) { Mutate([&](Config& c){ c.ffb.stationaryThresholdMps = std::clamp(v, 0.f, 10.f); }); }
     void SetYawFeedbackPct(int32_t v)       { Mutate([&](Config& c){ c.ffb.yawFeedbackPct = std::clamp(v, 0, 100); }); }
     void SetActiveTorqueStrengthPct(int32_t v) { Mutate([&](Config& c){ c.ffb.activeTorqueStrengthPct = std::clamp(v, 0, 100); }); }
+    void SetFfbInvertDirection(bool v)         { Mutate([&](Config& c){ c.ffb.invertDirection = v; }); }
+    void SetFfbOutputSignFlip(bool v)          { Mutate([&](Config& c){ c.ffb.outputSignFlip = v; }); }
+    void SetFfbUseSpring(bool v)               { Mutate([&](Config& c){ c.ffb.useSpring = v; }); }
 
     void SetHandshakePlayOnStart(bool v)    { Mutate([&](Config& c){ c.handshake.playOnStart = v; }); }
 

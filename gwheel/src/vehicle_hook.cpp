@@ -6,6 +6,8 @@
 #include "wheel.h"
 #include "vehicle_physics_ext.h"
 #include "rtti_offsets.h"
+#include "tweakdb_physics.h"
+#include "axis_resolver.h"
 
 #include <RED4ext/Relocation.hpp>
 #include <RED4ext/Api/v1/Sdk.hpp>
@@ -24,6 +26,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 
 namespace gwheel::vehicle_hook
 {
@@ -120,6 +123,29 @@ namespace gwheel::vehicle_hook
         // so every fresh ride prints its turnRate / wheelbase / slip-curve
         // etc. once to the log.
         std::atomic<void*> g_lastPhysicsLoggedVehicle{nullptr};
+
+        // Cached per-car snapshot resolved once per mount.
+        //
+        // Calling tweakdb_physics::ReadPerCarPhysics every tick was
+        // empirically crashing the game (0xC0000005 reading at 0x2BD on
+        // Galena mount, 2026-05-01) — bisect proved the per-tick path was
+        // the trigger; the once-per-vehicle dump alone is safe. The
+        // suspected mechanism is the per-tick ExecuteFunction(GetRecord)
+        // invocation inside ResolvePerVehicle leaking or over-decrementing
+        // a Handle<gamedataVehicle_Record> refcount; over a few ticks the
+        // game ends up dereferencing a freed record at an internal field
+        // (0x2BD on null is a small-offset null-deref pattern).
+        //
+        // Resolution: do the full chain resolution + authored-field reads
+        // once per `self` (in the snapshot-dump block) and stash the
+        // result here. Per tick we lift the authored values from this
+        // stash and overwrite the live-state slots from the already-
+        // computed ReadVelocity / ReadAngularVelocity values further down
+        // in the FFB block — no second TweakDB chain walk per tick.
+        // Cleared on player-vehicle change.
+        std::mutex                      g_perCarMu;
+        void*                           g_perCarSelf = nullptr;
+        tweakdb_physics::PerCarPhysics  g_perCarSnapshot{};
 
         // Cached per-tick yaw reference (rad/s) derived from the current
         // vehicle's WheeledPhysics::turnRate. Zero means "fall back to the
@@ -477,6 +503,21 @@ namespace gwheel::vehicle_hook
             if (!frame.connected) return;
             const auto cfg = config::Current();
 
+            // Steer-direction sign multiplier driven by the user's "Invert
+            // FFB direction" toggle. When set, applies to BOTH:
+            //   1. the wheel position written into the game's input field
+            //      (so turning the wheel right makes the car turn left),
+            //   2. the same wheel position fed to the FFB pipeline as
+            //      driver.steerNormalized (so signSteer flips, and the
+            //      pipeline computes restoring torque relative to the
+            //      flipped game-state).
+            // The line in wheel.cpp that flips constForce one more time
+            // then keeps the *physical* SDK push direction correct (toward
+            // center) in the inverted world. Throttle / brake are unsigned
+            // (0..1) so inversion doesn't apply to them.
+            const float steerSign = cfg.ffb.invertDirection ? -1.f : 1.f;
+            const float steerEffective = Clamp(frame.axes.steer * steerSign, -1.0f, 1.0f);
+
             // Cast once to read labeled fields from the RED4ext SDK struct.
             // acceleration / deceleration are the processed drive commands
             // (what we've historically called throttle/brake in this mod).
@@ -487,7 +528,7 @@ namespace gwheel::vehicle_hook
                 // Compute the wheel's contribution to each axis. G HUB owns
                 // the per-profile operating range, so wheel position passes
                 // through unmodified.
-                const float wheelSteer    = Clamp(frame.axes.steer,    -1.0f, 1.0f);
+                const float wheelSteer    = steerEffective;
                 const float wheelThrottle = Clamp(frame.axes.throttle,  0.0f, 1.0f);
                 const float wheelBrake    = Clamp(frame.axes.brake,     0.0f, 1.0f);
 
@@ -523,12 +564,14 @@ namespace gwheel::vehicle_hook
 
             // Physics-model FFB. Runs independently of cfg.input.enabled so
             // FFB still behaves correctly when the user disables input
-            // injection for testing. cfg.ffb.enabled is the single master
-            // toggle; there is no separate "centering only" gate.
-            if (cfg.ffb.enabled)
+            // injection for testing. Gated on (a) the master cfg.ffb.enabled
+            // toggle and (b) SteerAxis being bound to a wheel-axis source —
+            // there's no point firing motor effects when the user is driving
+            // with keyboard / gamepad. The else-branch performs the edge
+            // teardown so an unbinding mid-drive doesn't latch effects.
+            const bool steerWheelBound = axis_resolver::IsActionWheelBound("SteerAxis");
+            if (cfg.ffb.enabled && steerWheelBound)
             {
-                const float speed = std::fabs(ReadVehicleSpeed(self));
-
                 // Angular velocity magnitude from the vehicle's PhysicsData,
                 // read via the RTTI-resolved offsets. Dominant component is
                 // yaw (Z in REDengine), but we take the full vector
@@ -604,44 +647,11 @@ namespace gwheel::vehicle_hook
                 // be save-state infrastructure (written at save/unload
                 // boundaries, not per-frame).
 
-                // Per-car physics snapshot drives yaw reference, cruise
-                // speed, and centering-baseline derivation. Hardcoded
-                // fallbacks kick in for vehicles whose physics we can't
-                // read (tanks, air, first-tick race before the read lands).
-                constexpr float kFallbackYawRef      = 1.5f;  // rad/s — generic sports car
-                constexpr float kFallbackCruiseMps   = 18.f;  // ~65 km/h
-                constexpr float kFallbackCenteringB  = 0.85f; // mid-weight, matches new formula
-                constexpr float kWheelbaseMinM       = 0.8f;
-                constexpr float kWheelbaseMaxM       = 6.0f;
-
-                const auto wp = vehicle_ext::ReadWheeledPhysics(self);
-                float perCarYawRef = 0.f;
-                if (wp.valid && wp.turnRate > 0.f)
-                    perCarYawRef = std::clamp(wp.turnRate, 0.3f, 10.f);
-                g_perCarYawRef.store(perCarYawRef, std::memory_order_relaxed);
-                const float yawRef = (perCarYawRef > 0.f) ? perCarYawRef : kFallbackYawRef;
-
-                // Cruise speed derived from wheelbase: longer chassis cruise
-                // at higher speeds. cruise = 5 + 5×wheelbase, clamped. Maps
-                // a 2.5m wheelbase (sports car) to ~17.5 m/s (63 km/h), a
-                // 3.5m truck to 22.5 m/s, a 1.4m bike to 12 m/s.
-                //
-                // Centering baseline: stiffer car = more SAT per m/s. Use
-                // wheelbase as a proxy for chassis stability — heavier
-                // longer cars load the wheel harder at cruise. Formula
-                // tuned so a 2.5m sports car hits 0.875 at cruise (heavy
-                // but not locked), a 3.5m truck hits 1.0 (locked), a 1.4m
-                // bike hits 0.71 (loose but present).
-                float cruiseMps        = kFallbackCruiseMps;
-                float centeringBaseline = kFallbackCenteringB;
-                if (wp.valid
-                    && wp.frontBackWheelDistance >= kWheelbaseMinM
-                    && wp.frontBackWheelDistance <= kWheelbaseMaxM)
-                {
-                    const float wb = wp.frontBackWheelDistance;
-                    cruiseMps        = std::clamp(5.f + 5.f * wb, 10.f, 40.f);
-                    centeringBaseline = std::clamp(0.5f + 0.15f * wb, 0.5f, 1.0f);
-                }
+                // Per-car physics snapshot drives the FFB pipeline directly
+                // through ApplyFfbFromPhysics. The legacy wheelbase-derived
+                // cruiseMps / centeringBaseline / yawRef heuristics moved
+                // inside that function, sourced from authored TweakDB values
+                // instead of hand-fit constants.
 
                 // Run the offset probe once we have a live player vehicle.
                 // Self-discovering: scans for back-pointer correlations to
@@ -664,33 +674,71 @@ namespace gwheel::vehicle_hook
                     if (g_lastPhysicsLoggedVehicle.compare_exchange_strong(
                             lastLogged, self, std::memory_order_acq_rel))
                     {
-                        log::InfoF("[gwheel:ffb] per-car physics for vehicle=%p:", self);
-                        if (wp.valid)
+                        // Full PerCarPhysics snapshot — composes TweakDB
+                        // authored values + live-state probe. ResolvePerVehicle
+                        // is called inside ReadPerCarPhysics, so chain
+                        // resolution + log emission still fires once per
+                        // unique vehicle. Step 5 will replace the existing
+                        // per-tick FFB derivation block with this snapshot.
+                        const auto pc = tweakdb_physics::ReadPerCarPhysics(self);
+
+                        const char* kindStr =
+                            (pc.kind == tweakdb_physics::ChassisKind::Car)  ? "Car"  :
+                            (pc.kind == tweakdb_physics::ChassisKind::Bike) ? "Bike" : "Unknown";
+
+                        log::InfoF("[gwheel:ffb] per-car snapshot vehicle=%p kind=%s wheels=%u chainResolved=%d liveState=%d",
+                                   self, kindStr, pc.wheelCount, pc.chainResolved ? 1 : 0, pc.liveStateValid ? 1 : 0);
+                        log::InfoF("[gwheel:ffb]   live: vel=(%.2f, %.2f, %.2f) angVel=(%.2f, %.2f, %.2f) speed=%.2fm/s yawMag=%.3frad/s",
+                                   pc.vel[0], pc.vel[1], pc.vel[2],
+                                   pc.angVel[0], pc.angVel[1], pc.angVel[2],
+                                   pc.speedMps, pc.yawMagRadPerSec);
+                        log::InfoF("[gwheel:ffb]   slipAngle: curveScale=%.3f minSpeed=%.2f | slipRatio: curveScale=%.3f minSpeed=%.2f",
+                                   pc.slipAngleCurveScale, pc.slipAngleMinSpeedThreshold,
+                                   pc.slipRatioCurveScale, pc.slipRatioMinSpeedThreshold);
+                        log::InfoF("[gwheel:ffb]   weightTransfer: fwd=%.3f side=%.3f | airDrag=%.3f brakeFrict=%.3f handbrakeTq=%.0f",
+                                   pc.forwardWeightTransferFactor, pc.sideWeightTransferFactor,
+                                   pc.airResistanceFactor, pc.brakingFrictionFactor, pc.handbrakeBrakingTorque);
+                        log::InfoF("[gwheel:ffb]   slope: begin=%.2f max=%.2f factor=%.2f | turningRoll=%.3f",
+                                   pc.slopeTractionReductionBegin, pc.slopeTractionReductionMax,
+                                   pc.slopeTractionReductionFactor, pc.turningRollFactor);
+                        log::InfoF("[gwheel:ffb]   turnUpdate: thresh=%.1f/%.1f/%.1f mul=%.3f/%.3f changeMul=%.3f/%.3f",
+                                   pc.turnUpdateBaseSpeedThreshold, pc.turnUpdateMidSpeedThreshold, pc.turnUpdateMaxSpeedThreshold,
+                                   pc.turnUpdateMidSpeedTurnMul, pc.turnUpdateMaxSpeedTurnMul,
+                                   pc.turnUpdateMidSpeedTurnChangeMul, pc.turnUpdateMaxSpeedTurnChangeMul);
+                        log::InfoF("[gwheel:ffb]   wheel: maxTurnDeg=%.1f addPerSec=%.1f subPerSec=%.1f perfectSteer=%.3f diffOvershoot=%.3f",
+                                   pc.maxWheelTurnDeg, pc.wheelTurnMaxAddPerSecond, pc.wheelTurnMaxSubPerSecond,
+                                   pc.perfectSteeringFactor, pc.differentialOvershootFactor);
+                        log::InfoF("[gwheel:ffb]   chassis: bankFB=%.3f bankLR=%.3f bodyFrict=%.3f totalMass=%.0f chassisMass=%.0f",
+                                   pc.bankBodyFBTanMultiplier, pc.bankBodyLRTanMultiplier,
+                                   pc.bodyFriction, pc.totalMass, pc.chassisMass);
+                        log::InfoF("[gwheel:ffb]   tires: front r=%.3f w=%.3f | back r=%.3f w=%.3f",
+                                   pc.frontTireRadius, pc.frontTireWidth,
+                                   pc.backTireRadius, pc.backTireWidth);
+                        log::InfoF("[gwheel:ffb]   friction (default surface): lat=%.3f long=%.3f",
+                                   pc.frictionLatMultiplier, pc.frictionLongMultiplier);
+                        if (pc.kind == tweakdb_physics::ChassisKind::Bike)
                         {
-                            log::InfoF("[gwheel:ffb]   turnRate=%.3f maxWheelTurnDeg=%.2f slipAngleCurveScale=%.3f "
-                                       "numDriveWheels=%u wheelbase=%.3f",
-                                       wp.turnRate, wp.maxWheelTurnDeg, wp.slipAngleCurveScale,
-                                       wp.numDriveWheels, wp.frontBackWheelDistance);
+                            log::InfoF("[gwheel:ffb]   bike: maxTilt=%.3f tiltSpeed=%.3f tiltCustom=%.3f tiltReturn=%.3f",
+                                       pc.bikeMaxTilt, pc.bikeTiltSpeed,
+                                       pc.bikeTiltCustomSpeed, pc.bikeTiltReturnSpeed);
                         }
-                        else
+                        for (uint32_t i = 0; i < pc.wheelCount; ++i)
                         {
-                            log::Info("[gwheel:ffb]   WheeledPhysics unavailable (tank / air / mount race?)");
+                            log::InfoF("[gwheel:ffb]   wheel[%u]: drive=%d brake=%d handbrake=%d", i,
+                                       pc.wheels[i].isDrive ? 1 : 0,
+                                       pc.wheels[i].isMainBrake ? 1 : 0,
+                                       pc.wheels[i].isHandBrake ? 1 : 0);
                         }
-                        float vel[3] = {};
-                        if (vehicle_ext::ReadVelocity(self, vel))
+
+                        // Stash the resolved snapshot so the hot path below
+                        // doesn't have to call ReadPerCarPhysics every tick.
+                        // See comment on g_perCarSnapshot for why per-tick
+                        // chain resolution crashes the game.
                         {
-                            log::InfoF("[gwheel:ffb]   velocity=(%.2f, %.2f, %.2f) angVel=(%.2f, %.2f, %.2f)",
-                                       vel[0], vel[1], vel[2],
-                                       angVel[0], angVel[1], angVel[2]);
+                            std::lock_guard<std::mutex> lk(g_perCarMu);
+                            g_perCarSelf     = self;
+                            g_perCarSnapshot = pc;
                         }
-                        log::InfoF("[gwheel:ffb]   yawRef in use: %.3f rad/s (%s)",
-                                   yawRef, perCarYawRef > 0.f ? "from turnRate" : "hardcoded fallback");
-                        log::InfoF("[gwheel:ffb]   derived cruise=%.2f m/s, centeringBaseline=%.3f (%s)",
-                                   cruiseMps, centeringBaseline,
-                                   (wp.valid
-                                    && wp.frontBackWheelDistance >= kWheelbaseMinM
-                                    && wp.frontBackWheelDistance <= kWheelbaseMaxM)
-                                       ? "from wheelbase" : "hardcoded fallback");
                     }
                 }
 
@@ -704,34 +752,121 @@ namespace gwheel::vehicle_hook
                 // push-back). frame.axes.steer is always normalised -1..+1
                 // against the *current* operating range, so a moderate
                 // hand position always reads as a moderate value.
-                const float torqueSteer = Clamp(frame.axes.steer, -1.0f, 1.0f);
+                // Uses steerEffective so the user's invert toggle flips
+                // signSteer in lockstep with the inverted game input.
+                const float torqueSteer = steerEffective;
 
-                wheel::UpdateCenteringSpring(
-                    speed,
-                    angVelMag,
-                    suspensionActivity,
-                    lateralVelocityMps,
-                    torqueSteer,
-                    veh->acceleration,  // post-merge throttle (0..1)
-                    veh->deceleration,  // post-merge brake (0..1)
-                    veh->isReversing,
-                    veh->isOnGround,
-                    /*enabled*/       true,
-                    cfg.ffb.stationaryThresholdMps,
-                    cruiseMps,
-                    centeringBaseline,
-                    cfg.ffb.yawFeedbackPct,
-                    yawRef,
-                    cfg.ffb.activeTorqueStrengthPct,
-                    cfg.ffb.debugLogging);
+                // Lift the authored-fields snapshot from the per-mount cache
+                // populated by the snapshot-dump block above. Then overwrite
+                // the live-state fields from the values we already computed
+                // earlier in this tick (linVel / angVel / lateralVelocityMps).
+                // No per-tick TweakDB chain walk; no per-tick ExecuteFunction
+                // call. See the g_perCarSnapshot declaration for why.
+                tweakdb_physics::PerCarPhysics pc{};
+                {
+                    std::lock_guard<std::mutex> lk(g_perCarMu);
+                    if (g_perCarSelf == self)
+                        pc = g_perCarSnapshot;
+                }
+                if (haveLinVel)
+                {
+                    pc.vel[0] = linVel[0]; pc.vel[1] = linVel[1]; pc.vel[2] = linVel[2];
+                    pc.speedMps         = std::sqrt(linVel[0] * linVel[0]
+                                                  + linVel[1] * linVel[1]
+                                                  + linVel[2] * linVel[2]);
+                    pc.verticalSpeedMps = linVel[2];
+                    pc.liveStateValid   = true;
+                }
+                pc.angVel[0] = angVel[0]; pc.angVel[1] = angVel[1]; pc.angVel[2] = angVel[2];
+                pc.yawMagRadPerSec = std::abs(angVel[2]);
+
+                // Per-tick read of bike/car-derived live state via hardcoded
+                // offsets. ValidateInDomain inside ReadBikeLiveFields / Car
+                // catches any drift; in that case `valid` returns false and
+                // the FFB pipeline falls back to the lateralVelocity-based
+                // proxies. Triangulated 2026-05-02; see fallback_bike /
+                // fallback_car namespaces in vehicle_physics_ext.h.
+                if (pc.kind == tweakdb_physics::ChassisKind::Bike)
+                {
+                    auto live = vehicle_ext::ReadBikeLiveFields(self);
+                    if (live.valid)
+                    {
+                        pc.bikeCurrentTilt      = live.currentTilt;
+                        pc.bikeTransversalForce = live.transversalForce;
+                        pc.bikeLiveValid        = true;
+                    }
+                }
+                else if (pc.kind == tweakdb_physics::ChassisKind::Car)
+                {
+                    auto live = vehicle_ext::ReadCarLiveFields(self);
+                    if (live.valid)
+                    {
+                        pc.carBankBodyLR = live.bankBodyLR;
+                        pc.carLiveValid  = true;
+                    }
+                }
+
+                // Event-triggered inner-physics probe per chassis kind. Bike
+                // and car physics classes are NOT RTTI-visible, so live-state
+                // fields (bikeCurrentTilt, bikeTransversalForce, carBankBodyLR,
+                // carCurrTurnInput, carBankBodyFB) need offset triangulation
+                // out-of-band. Each known-state regime (idle, left-corner,
+                // right-corner, hard-brake, hard-accel) latches its own
+                // single-shot full-float dump on the first tick its predicate
+                // fires; offline diffing across regimes pinpoints the live
+                // offsets directly.
+                if (pc.chainResolved)
+                {
+                    if (void* phys = vehicle_ext::GetPhysicsRaw(self))
+                    {
+                        rtti_offsets::InnerProbeState ps{};
+                        ps.isOnGround = veh->isOnGround;
+                        ps.speedMps   = pc.speedMps;
+                        ps.yawSigned  = angVel[2];
+                        ps.steerNorm  = torqueSteer;
+                        ps.throttle   = veh->acceleration;
+                        ps.brake      = veh->deceleration;
+
+                        if (pc.kind == tweakdb_physics::ChassisKind::Bike)
+                            rtti_offsets::TriggerBikeProbeSlot(phys, ps);
+                        else if (pc.kind == tweakdb_physics::ChassisKind::Car)
+                            rtti_offsets::TriggerCarProbeSlot(phys, ps);
+                    }
+                }
+
+                wheel::FfbDriverState driver{};
+                driver.steerNormalized    = torqueSteer;
+                driver.throttle           = veh->acceleration;
+                driver.brake              = veh->deceleration;
+                driver.isReversing        = veh->isReversing;
+                driver.isOnGround         = veh->isOnGround;
+                driver.suspensionActivity = suspensionActivity;
+                driver.lateralVelocityMps = lateralVelocityMps;
+
+                wheel::FfbUserScalars scalars{};
+                scalars.ffbEnabled         = true;
+                scalars.ffbInvertDirection = cfg.ffb.invertDirection;
+                scalars.ffbOutputSignFlip  = cfg.ffb.outputSignFlip;
+                scalars.ffbUseSpring       = cfg.ffb.useSpring;
+                scalars.torquePct          = cfg.ffb.torquePct;
+                scalars.yawFeedbackPct     = cfg.ffb.yawFeedbackPct;
+                scalars.activeTorquePct    = cfg.ffb.activeTorqueStrengthPct;
+                scalars.stationaryMps      = cfg.ffb.stationaryThresholdMps;
+                scalars.debugLogging       = cfg.ffb.debugLogging;
+
+                wheel::ApplyFfbFromPhysics(pc, driver, scalars);
             }
             else
             {
-                // FFB master toggle off — release every effect. Calling
-                // Update with enabled=false performs the edge teardown
+                // FFB master toggle off (or SteerAxis not wheel-bound).
+                // Call with ffbEnabled=false to perform the edge teardown
                 // (spring, active, damper, road surface, airborne).
-                wheel::UpdateCenteringSpring(0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, false, true, /*enabled*/ false,
-                                             0.f, 1.f, 1.f, 0, 1.f, 0, cfg.ffb.debugLogging);
+                tweakdb_physics::PerCarPhysics emptyCar{};
+                wheel::FfbDriverState        emptyDriver{};
+                wheel::FfbUserScalars        emptyScalars{};
+                emptyScalars.ffbEnabled    = false;
+                emptyScalars.debugLogging  = cfg.ffb.debugLogging;
+                wheel::ApplyFfbFromPhysics(emptyCar, emptyDriver, emptyScalars);
             }
         }
     }
@@ -808,6 +943,11 @@ namespace gwheel::vehicle_hook
             g_prevLinVelZ.store(0.f, std::memory_order_release);
             for (int i = 0; i < 4; ++i)
                 g_lastWheelMat[i].store(0, std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> lk(g_perCarMu);
+                g_perCarSelf     = nullptr;
+                g_perCarSnapshot = tweakdb_physics::PerCarPhysics{};
+            }
         }
         // In-vehicle context flag tracks presence/absence of a mounted
         // vehicle pointer. input_bindings uses it to suppress vehicle-

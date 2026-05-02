@@ -31,6 +31,9 @@ public static native func GWheel_SetHandshakePlayOnStart(v: Bool) -> Bool;
 public static native func GWheel_SetStationaryThresholdMps(mps: Float) -> Bool;
 public static native func GWheel_SetYawFeedbackPct(pct: Int32) -> Bool;
 public static native func GWheel_SetActiveTorqueStrengthPct(pct: Int32) -> Bool;
+public static native func GWheel_SetFfbInvertDirection(v: Bool) -> Bool;
+public static native func GWheel_SetFfbOutputSignFlip(v: Bool) -> Bool;
+public static native func GWheel_SetFfbUseSpring(v: Bool) -> Bool;
 
 // Rev-strip LED bar on top of the wheel (G29/G920/G923). VisualizerWhileMusic
 // swaps the speed-driven rev bar for a WASAPI-loopback audio visualizer

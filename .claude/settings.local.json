@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Read(//s/SteamLibrary/steamapps/common/Cyberpunk 2077/red4ext/logs//**)",
-      "PowerShell(powershell -ExecutionPolicy Bypass -File deploy.ps1 -Game \"S:\\\\SteamLibrary\\\\steamapps\\\\common\\\\Cyberpunk 2077\")"
+      "PowerShell(powershell -ExecutionPolicy Bypass -File deploy.ps1 -Game \"S:\\\\SteamLibrary\\\\steamapps\\\\common\\\\Cyberpunk 2077\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"Z:/repos/gaming/mods/cp2077-wheel-mod/build.ps1\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"Z:/repos/gaming/mods/cp2077-wheel-mod/deploy.ps1\" -Game \"S:/SteamLibrary/steamapps/common/Cyberpunk 2077\")",
+      "Bash(sed -i \"s|gwheel-2026-05-01-21-52-28|gwheel-2026-05-02-10-57-46|\" /tmp/probe_diff.py)",
+      "Bash(python3 /tmp/probe_diff.py)",
+      "Bash(Get-ChildItem -Path \"Z:\\\\repos\\\\gaming\\\\mods\\\\cp2077-wheel-mod\" -Recurse -Force)",
+      "Bash(Select-Object -First 50)",
+      "Bash(Format-Table FullName)"
     ]
   }
 }

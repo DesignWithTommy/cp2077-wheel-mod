@@ -79,6 +79,19 @@ namespace gwheel::axis_resolver
         return it->second;
     }
 
+    bool IsActionWheelBound(const char* actionName)
+    {
+        const std::string binding = GetBinding(actionName);
+        if (binding.empty()) return false;
+        bool found = false;
+        std::string axisName;
+        ForEachToken(binding, [&](const char* tok, size_t len) {
+            if (found) return;
+            if (ParseWheelAxis(tok, len, axisName)) found = true;
+        });
+        return found;
+    }
+
     float Resolve(const char* actionName, const wheel::Snapshot& snap, Combine mode)
     {
         if (!snap.connected) return 0.f;

@@ -45,4 +45,11 @@ namespace gwheel::axis_resolver
     // `mode`. Returns 0 when unbound, when the token isn't a `wheel-axis:`
     // form, or when `snap.connected` is false.
     float Resolve(const char* actionName, const wheel::Snapshot& snap, Combine mode);
+
+    // True iff the action's binding string contains at least one
+    // `wheel-axis:NAME` token. Cheap check; no axis dereference. Used by
+    // FFB output gating: when SteerAxis isn't bound to the wheel, motor
+    // effects should not fire (the wheel rim should sit still while the
+    // user drives with keyboard / gamepad).
+    bool IsActionWheelBound(const char* actionName);
 }

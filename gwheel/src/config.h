@@ -40,6 +40,37 @@ namespace gwheel::config
         float   stationaryThresholdMps  = 0.5f;
         int32_t yawFeedbackPct          = 50;
         int32_t activeTorqueStrengthPct = 100;
+
+        // Flip the sign of all restoring forces (centering spring + active
+        // torque + slip-angle countersteer). Some wheels invert their
+        // FFB-direction convention against the SDK's; this is the user
+        // escape hatch for that case. Off = standard SDK convention.
+        bool    invertDirection = false;
+
+        // Per-wheel hardware-direction quirk: some Logitech wheels (verified
+        // on a G923 2026-05-01) interpret `LogiPlayConstantForce(idx, +pct)`
+        // as a counter-clockwise push, opposite to the SDK's typically-
+        // documented convention (positive = CW). Symptom: with the spring
+        // disabled, constForce alone drives the wheel to full lock instead
+        // of pulling it to center. Enable this toggle if your wheel exhibits
+        // that behavior. Default off so wheels with the documented convention
+        // are unaffected.
+        bool    outputSignFlip = false;
+
+        // User-facing label: "Speed-sensitive stiffness" (a sportscar-style
+        // steering-assist feel). Mechanism: toggles the LogiPlaySpringForce
+        // centering layer on top of the SAT-driven LogiPlayConstantForce.
+        //
+        // On (default): the spring saturates with speed², adding the firm
+        // "steering tightens at highway speed" feel. This is what cars with
+        // electronic power steering do (Lexus, BMW Servotronic, etc.).
+        //
+        // Off: BeamNG-style pure tire-force pipeline — only LogiPlayConstantForce
+        // drives the wheel. Matches what physics-honest sims do. Wheel goes
+        // light at rest and feels more raw at speed; some Logitech hardware
+        // also exhibits a "stuck at deflection" quirk where the SDK spring
+        // cancels the constant-force centering, which this option avoids.
+        bool    useSpring = true;
     };
 
     struct PerVehicle
@@ -137,6 +168,9 @@ namespace gwheel::config
     void SetStationaryThresholdMps(float v);
     void SetYawFeedbackPct(int32_t v);
     void SetActiveTorqueStrengthPct(int32_t v);
+    void SetFfbInvertDirection(bool v);
+    void SetFfbOutputSignFlip(bool v);
+    void SetFfbUseSpring(bool v);
 
     void SetHandshakePlayOnStart(bool v);
 

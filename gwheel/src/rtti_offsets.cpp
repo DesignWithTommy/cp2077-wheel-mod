@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 
 namespace gwheel::rtti_offsets
 {
@@ -374,6 +375,226 @@ namespace gwheel::rtti_offsets
         }
 
         log::Info("[gwheel:rtti-off] ---- end inner-field scan ----");
+    }
+
+    namespace
+    {
+        // Slot ids and their human-readable tags. Per-kind, each slot latches
+        // independently. Operator diffs the per-slot full-float dumps after
+        // the session to identify which offsets carry which live signal.
+        enum ProbeSlot : int
+        {
+            Slot_Idle = 0,
+            Slot_LeftCorner,
+            Slot_RightCorner,
+            Slot_HardBrake,
+            Slot_HardAccel,
+            Slot_Count
+        };
+
+        constexpr const char* kSlotName[Slot_Count] = {
+            "idle", "left-corner", "right-corner", "hard-brake", "hard-accel",
+        };
+
+        // Per-kind latch state. The detour thread is the only writer.
+        struct ProbeLatches
+        {
+            bool fired[Slot_Count] = {};
+        };
+
+        ProbeLatches& BikeLatches() { static ProbeLatches s; return s; }
+        ProbeLatches& CarLatches()  { static ProbeLatches s; return s; }
+
+        // Bike/car-derived live fields sit AFTER the WheeledPhysics base.
+        // 1.52 SDK puts the boundary at 0xDE0; BikePhysics extends to 0xE80
+        // (+0xA0), CarPhysics to 0xF50 (+0x170). 2.31 likely close. Scan
+        // [0x800, kindEnd) — past the WheeledPhysics base, capping at each
+        // derived class's known-1.52 size with a small margin.
+        //
+        // CRASH FIX (2026-05-02): the previous range [0xC00, 0x1200) overran
+        // the heap allocation when a new vehicle was summoned with a tighter
+        // page layout, hitting an unmapped page → access violation. The
+        // VirtualQuery wrapper below now caps every scan at the live region
+        // boundary regardless of the requested range, so any future range
+        // bumps are safe.
+        constexpr std::ptrdiff_t kBikeScanStart = 0x800;
+        constexpr std::ptrdiff_t kBikeScanEnd   = 0xE80;
+        constexpr std::ptrdiff_t kCarScanStart  = 0x800;
+        constexpr std::ptrdiff_t kCarScanEnd    = 0xF50;
+
+        // Cap [scanStart, scanEnd) at the boundary of the heap region that
+        // contains `base`. VirtualQuery returns the start + size of the
+        // committed region; reads past `base + (regionStart + regionSize)`
+        // can crash. Returns the largest safe end offset, never larger than
+        // requested. If VirtualQuery fails or the page isn't readable,
+        // returns scanStart (so the scan loop is a no-op).
+        std::ptrdiff_t SafeScanEnd(const void* base,
+                                   std::ptrdiff_t scanStart,
+                                   std::ptrdiff_t scanEnd)
+        {
+            if (!base) return scanStart;
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(base, &mbi, sizeof(mbi)) == 0) return scanStart;
+            if (mbi.State != MEM_COMMIT) return scanStart;
+            const DWORD rw = PAGE_READWRITE | PAGE_READONLY
+                           | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE;
+            if (!(mbi.Protect & rw)) return scanStart;
+
+            const auto baseAddr   = reinterpret_cast<uintptr_t>(base);
+            const auto regionEnd  = reinterpret_cast<uintptr_t>(mbi.BaseAddress)
+                                  + mbi.RegionSize;
+            if (regionEnd <= baseAddr) return scanStart;
+            const std::ptrdiff_t maxOffset =
+                static_cast<std::ptrdiff_t>(regionEnd - baseAddr);
+            return std::min(scanEnd, maxOffset);
+        }
+
+        // Trigger thresholds. Tight enough to fire only on clear regimes:
+        //   - Idle: nearly stationary, rim within deadband, no pedal input.
+        //   - Cornering: yaw rate exceeds threshold AND driver steer agrees
+        //     in sign (filters out yaw bursts from terrain bumps).
+        //   - HardBrake / HardAccel: pedal saturated, speed regime sensible.
+        constexpr float kIdleSpeedMax       = 1.0f;   // m/s
+        constexpr float kIdleSteerAbs       = 0.05f;
+        constexpr float kCornerYawAbs       = 0.4f;   // rad/s
+        constexpr float kCornerSteerAbs     = 0.20f;
+        constexpr float kCornerSpeedMin     = 4.0f;   // m/s
+        constexpr float kBrakeMin           = 0.8f;
+        constexpr float kBrakeSpeedMin      = 5.0f;   // m/s
+        constexpr float kAccelMin           = 0.8f;
+        constexpr float kAccelMaxBrake      = 0.05f;
+        constexpr float kAccelSpeedMin      = 1.0f;
+
+        // Pick the slot whose predicate is satisfied AND hasn't latched.
+        // Returns Slot_Count when nothing applies. Order matters when multiple
+        // predicates would match — Idle wins under low-input idle, corner
+        // wins over brake when both apply, etc. — but in practice the gating
+        // is tight enough that overlap is rare.
+        int PickSlot(const InnerProbeState& s, const ProbeLatches& latches)
+        {
+            // Idle: stationary, no rim deflection, no pedal pressed.
+            if (!latches.fired[Slot_Idle]
+                && s.isOnGround
+                && s.speedMps < kIdleSpeedMax
+                && std::fabs(s.steerNorm) < kIdleSteerAbs
+                && s.throttle < 0.05f && s.brake < 0.05f)
+                return Slot_Idle;
+
+            // Left corner: yaw signed negative + steer signed negative.
+            // Sign convention: angVel.z is the world-space yaw rate. On a
+            // bike or car turning left, the chassis yaws CCW (negative z in
+            // CDPR's convention). Driver steer: negative = left.
+            const bool yawLeft  = s.yawSigned < -kCornerYawAbs;
+            const bool yawRight = s.yawSigned >  kCornerYawAbs;
+            const bool steerLeft  = s.steerNorm < -kCornerSteerAbs;
+            const bool steerRight = s.steerNorm >  kCornerSteerAbs;
+            const bool moving   = s.isOnGround && s.speedMps > kCornerSpeedMin;
+
+            if (!latches.fired[Slot_LeftCorner]  && moving && yawLeft  && steerLeft)
+                return Slot_LeftCorner;
+            if (!latches.fired[Slot_RightCorner] && moving && yawRight && steerRight)
+                return Slot_RightCorner;
+
+            if (!latches.fired[Slot_HardBrake]
+                && s.isOnGround
+                && s.brake > kBrakeMin
+                && s.speedMps > kBrakeSpeedMin)
+                return Slot_HardBrake;
+
+            if (!latches.fired[Slot_HardAccel]
+                && s.isOnGround
+                && s.throttle > kAccelMin
+                && s.brake < kAccelMaxBrake
+                && s.speedMps > kAccelSpeedMin)
+                return Slot_HardAccel;
+
+            return Slot_Count;
+        }
+
+        // Full float dump (no domain filter) over [scanStart, scanEnd).
+        // Output is one row per 4 fields so a 1.7KB region produces ~50
+        // log lines. The operator diffs slots after the session — a packed
+        // dump is far more compact than per-field rows for that workflow.
+        void DumpAllFloats(const char* tag, const char* slotName,
+                           const InnerProbeState& s, const void* base,
+                           std::ptrdiff_t scanStart, std::ptrdiff_t scanEnd)
+        {
+            if (!base) return;
+            const std::ptrdiff_t safeEnd = SafeScanEnd(base, scanStart, scanEnd);
+            log::InfoF("[gwheel:rtti-off] ---- %s @ %s (speed=%.2f yaw=%+.3f steer=%+.3f thr=%.2f br=%.2f) ----",
+                       tag, slotName,
+                       s.speedMps, s.yawSigned, s.steerNorm, s.throttle, s.brake);
+            log::InfoF("[gwheel:rtti-off] %s @ %s scan [0x%03X..0x%03X) base=%p (capped from 0x%03X)",
+                       tag, slotName,
+                       static_cast<unsigned>(scanStart),
+                       static_cast<unsigned>(safeEnd),
+                       base,
+                       static_cast<unsigned>(scanEnd));
+            scanEnd = safeEnd;
+            if (scanEnd <= scanStart)
+            {
+                log::InfoF("[gwheel:rtti-off]   (region too small — skipping)");
+                log::InfoF("[gwheel:rtti-off] ---- %s @ %s end ----", tag, slotName);
+                return;
+            }
+
+            const auto* bytes = static_cast<const char*>(base);
+            char line[256];
+            int  inLine = 0;
+            int  written = 0;
+            line[0] = '\0';
+            for (std::ptrdiff_t off = scanStart; off + 4 <= scanEnd; off += 4)
+            {
+                const float v = *reinterpret_cast<const float*>(bytes + off);
+                if (!std::isfinite(v)) continue;
+                const int n = std::snprintf(line + written, sizeof(line) - written,
+                                            "%s+0x%03X=%+.4f",
+                                            inLine == 0 ? "" : "  ",
+                                            static_cast<unsigned>(off), v);
+                if (n <= 0 || n >= static_cast<int>(sizeof(line) - written)) break;
+                written += n;
+                if (++inLine >= 4)
+                {
+                    log::InfoF("[gwheel:rtti-off]   %s", line);
+                    line[0] = '\0';
+                    written = 0;
+                    inLine = 0;
+                }
+            }
+            if (inLine > 0)
+                log::InfoF("[gwheel:rtti-off]   %s", line);
+            log::InfoF("[gwheel:rtti-off] ---- %s @ %s end ----", tag, slotName);
+        }
+
+        void TriggerSlot(const char* tag, const void* base,
+                         std::ptrdiff_t scanStart, std::ptrdiff_t scanEnd,
+                         ProbeLatches& latches, const InnerProbeState& s)
+        {
+            if (!base) return;
+            const int slot = PickSlot(s, latches);
+            if (slot >= Slot_Count) return;
+            DumpAllFloats(tag, kSlotName[slot], s, base, scanStart, scanEnd);
+            latches.fired[slot] = true;
+
+            // Once-only summary when all slots have fired so the operator
+            // sees a clean "kind complete" line in the log.
+            bool allFired = true;
+            for (bool b : latches.fired) { if (!b) { allFired = false; break; } }
+            if (allFired)
+                log::InfoF("[gwheel:rtti-off] **** %s probe: all slots captured ****", tag);
+        }
+    }
+
+    void TriggerBikeProbeSlot(const void* bp, const InnerProbeState& st)
+    {
+        TriggerSlot("BikePhysics", bp, kBikeScanStart, kBikeScanEnd,
+                    BikeLatches(), st);
+    }
+
+    void TriggerCarProbeSlot(const void* cp, const InnerProbeState& st)
+    {
+        TriggerSlot("CarPhysics", cp, kCarScanStart, kCarScanEnd,
+                    CarLatches(), st);
     }
 
     void DumpClassProperties(const char* className)

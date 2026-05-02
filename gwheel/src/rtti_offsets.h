@@ -5,11 +5,19 @@
 // (Header includes std::initializer_list for the dump helpers below.)
 //
 // CP2077's scripting RTTI registers every script-visible field on every
-// script-visible class as a CProperty with a valueOffset. Instead of
-// hardcoding offsets (which drift between patches and across SDK forks),
-// we look them up by name at plugin load: `vehicleBaseObject.physicsData`,
-// `vehicleWheeledPhysics.turnRate`, etc. The results are cached in
-// statics and exposed via small accessors.
+// script-visible class as a CProperty with a valueOffset. We look those
+// up by name at plugin load: `vehicleBaseObject.physicsData`,
+// `vehiclePhysicsData.velocity`, etc. The results are cached in statics
+// and exposed via small accessors.
+//
+// Scope: only the classes that ARE reflection-registered are read here.
+// Empirically verified 2026-04-30: vehicleWheeledPhysics / vehicleCarPhysics
+// / vehicleBikePhysics / physicsVehiclePhysicsInsert1 are NOT RTTI-visible
+// (`class not found` on every lookup). For those, the redesign reads
+// authored values from TweakDB record classes instead — see
+// gwheel/src/tweakdb_physics.{h,cpp}. Per-tick live state from those
+// non-RTTI structs is read via hardcoded offsets (see
+// gwheel/src/vehicle_physics_ext.h::fallback).
 //
 // Missing offsets (e.g., a field that isn't RTTI-exposed on this build)
 // return 0 from the accessor; callers should gate on that and fall back
@@ -37,7 +45,11 @@ namespace gwheel::rtti_offsets
     uint32_t PhysicsData_velocityOffset();         // Vector3 linear velocity (m/s)
     uint32_t PhysicsData_angularVelocityOffset();  // Vector3 angular velocity (rad/s)
 
-    // vehicle::WheeledPhysics fields — per-car handling tuning values.
+    // vehicle::WheeledPhysics fields. The class itself is NOT RTTI-registered
+    // on 2.31, so each Resolve() below logs `class not found` and the accessor
+    // returns 0; consumers fall back to the validated 2.31 hardcoded offsets
+    // in vehicle_physics_ext.h. The lookups are kept so that if a future
+    // patch ever exposes the class through RTTI we'll pick it up automatically.
     uint32_t WheeledPhysics_turnRateOffset();            // float — steering responsiveness
     uint32_t WheeledPhysics_maxWheelTurnDegOffset();     // float — max wheel turn angle (degrees)
     uint32_t WheeledPhysics_slipAngleCurveScaleOffset(); // float — slip curve scale
@@ -106,4 +118,39 @@ namespace gwheel::rtti_offsets
     // Called on first-tick per unique vehicle so a short drive across
     // several rides yields enough evidence to triangulate.
     void ProbeInnerWheeledFields(void* wheeledPhysics);
+
+    // --- Event-triggered inner-physics probes ------------------------------
+    //
+    // Bike and car physics classes are NOT RTTI-visible, so live-state field
+    // offsets (bikeCurrentTilt, bikeTransversalForce, carBankBodyLR,
+    // carCurrTurnInput, carBankBodyFB) need triangulation out-of-band.
+    //
+    // Strategy: known-state snapshot dumps. Driver inputs already tell us
+    // when the chassis is in a specific live-state regime — upright vs
+    // leaning, straight vs cornering, accel vs brake. We dump the full
+    // float layout once per regime, latched per session. Cross-regime diffs
+    // identify which offsets are live signals and which way they swing.
+    //
+    // Slots, per kind:
+    //   Idle          — at rest or near-rest, rim ~ centered, no brake/accel
+    //   Left-corner   — mid-corner, yaw signed left, |steer| > threshold, moving
+    //   Right-corner  — mid-corner, yaw signed right, |steer| > threshold, moving
+    //   Hard-brake    — brake near 1.0, speed > threshold
+    //   Hard-accel    — throttle near 1.0, no brake, moving
+    //
+    // The trigger function evaluates current driver state and fires whichever
+    // slot's predicate is satisfied + hasn't latched yet. Each slot logs the
+    // full float dump for its kind once and latches forever.
+    struct InnerProbeState
+    {
+        bool  isOnGround   = false;
+        float speedMps     = 0.f;
+        float yawSigned    = 0.f;   // signed yaw rate (rad/s); + = right, - = left
+        float steerNorm    = 0.f;   // signed driver steer in [-1, 1]
+        float throttle     = 0.f;
+        float brake        = 0.f;
+    };
+
+    void TriggerBikeProbeSlot(const void* bikePhysics, const InnerProbeState& st);
+    void TriggerCarProbeSlot (const void* carPhysics,  const InnerProbeState& st);
 }

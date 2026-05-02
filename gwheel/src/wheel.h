@@ -116,54 +116,6 @@ namespace gwheel::wheel
     // even when the chassis isn't being physically agitated.
     void SetSurfaceBaselineMag(float mag);
 
-    // Physics-model self-centering FFB. Three layered forces, edge-triggered
-    // and safe to call every tick:
-    //
-    //   (1) Passive spring (PlaySpringForce) — stiffness scales with speed²
-    //       and yaw rate. Provides "heavier wheel" feel at speed; zero when
-    //       parked so the wheel rests where the driver leaves it.
-    //
-    //   (2) Active alignment torque (PlayConstantForce) — directional push
-    //       driven by a lateral-acceleration proxy |yawRate × v|, shaped by
-    //       a humped curve over steer deflection (peak near 54%, falls to
-    //       zero at full lock — tires past peak slip lose SAT), multiplied
-    //       by an exponential grip factor that lightens the wheel as the
-    //       car slides past its native turnRate, and weighted by fore-aft
-    //       load transfer (braking loads the fronts → more SAT).
-    //
-    //   (3) Damper (PlayDamperForce) — viscous resistance that kills
-    //       on-center oscillation. Scales with speed² so parked wheel is
-    //       free, highway wheel has real weight behind motion.
-    //
-    // Per-car inputs (caller derives from WheeledPhysics, falls back to
-    // hardcoded defaults for vehicles whose physics we can't read):
-    //   cruiseMps         — speed at which v² saturates (derived from
-    //                       wheelbase)
-    //   centeringBaseline — per-car peak spring coef at cruise (derived
-    //                       from wheelbase)
-    //   yawRef            — rad/s yaw threshold (per-car turnRate)
-    //
-    // Formulas:
-    //   speedSq     = clamp((absSpeed / cruiseMps)², 0, 2.25)
-    //   yawRatio    = |angVelMag| / yawRef
-    //   yawRamp     = clamp(yawRatio, 0, 1)
-    //   gripFactor  = yawRatio < 1 ? 1 : exp(-2 × (yawRatio − 1))
-    //                     (smoothly decays past the yaw limit; ~0.14 at 2×)
-    //   loadFactor  = clamp(|angVelMag × absSpeed| / (yawRef × cruiseMps),
-    //                       0, 1.5)
-    //                     (lateral-accel proxy: 1.0 at steady-state limit,
-    //                      up to 1.5 for transient overshoot)
-    //   weight      = 1 + 0.3 × brake − 0.05 × throttle
-    //                     (fore-aft load transfer)
-    //   steerShape  = sqrt(|steer|) × (1 − steer⁴)   (humped, peak ~0.54)
-    //   reverseMul  = isReversing ? 0.4 : 1   (physical constant, not tunable)
-    //
-    //   springCoef  = clamp(centeringBaseline × speedSq × gripFactor
-    //                      + yawRamp × yawFeedbackPct/100, 0, 1) × reverseMul
-    //   activeForce = −sign(steer) × steerShape × loadFactor × gripFactor
-    //                 × weight × activeTorqueStrengthPct/100 × reverseMul
-    //   damperCoef  = clamp(speedSq × 0.4, 0, 0.5)
-    //
     // suspensionActivity drives the road-surface SINE effect. It's the
     // magnitude of the roll+pitch components of the vehicle's angular-
     // velocity derivative |Δω_x|+|Δω_y| (yaw excluded — that comes from
@@ -172,27 +124,54 @@ namespace gwheel::wheel
     // wheel vibrates proportionally. Caller computes the derivative each
     // tick by diffing against the previous angular-velocity read.
     //
-    // lateralVelocityMps is the car-LOCAL lateral velocity component:
-    // dot(worldVelocity, vehicle.GetWorldRight()). Signed — positive =
-    // sliding rightward, negative = sliding leftward, near-zero in
-    // normal grip. The update adds a countersteer nudge to the active
-    // torque when gripFactor drops, pulling the wheel toward the
-    // direction of travel (mirrors real SAT past peak slip).
-    void UpdateCenteringSpring(float absSpeedMps,
-                               float angVelMagRad,
-                               float suspensionActivity,
-                               float lateralVelocityMps,
-                               float steer,
-                               float throttle,
-                               float brake,
-                               bool  isReversing,
-                               bool  isOnGround,
-                               bool  enabled,
-                               float stationaryMps,
-                               float cruiseMps,
-                               float centeringBaseline,
-                               int   yawFeedbackPct,
-                               float yawRef,
-                               int   activeTorqueStrengthPct,
-                               bool  debugLog);
+    // Per-tick FFB output, composed from authored TweakDB physics + live
+    // state. Replaces the legacy heuristic UpdateCenteringSpring. The
+    // PerCarPhysics snapshot supplies authored values (slipAngleCurveScale,
+    // forwardWeightTransferFactor, turnUpdate* curve, friction multipliers,
+    // chassis mass, maxWheelTurnDeg, etc.); the FfbDriverState supplies
+    // per-tick driver-input + computed state (merged steer, throttle/brake,
+    // ground / reverse flags, suspension activity, lateral velocity).
+    //
+    // The function bails (tearing down all effects) when:
+    //   - scalars.ffbEnabled == false (master toggle)
+    //   - car.kind == ChassisKind::Unknown (out-of-scope chassis like tanks)
+    //   - car.chainResolved == false (mount race; retry next tick)
+    //   - car.liveStateValid == false
+    //   - speed < scalars.stationaryMps (parked / stationary)
+    // Airborne (!isOnGround) plays the SDK's airborne effect and tears down
+    // contact forces. ffbInvertDirection multiplies all restoring forces by
+    // -1 at the final stage so users with reverse-polarity wheel hardware
+    // can flip with one toggle.
+    struct FfbUserScalars
+    {
+        bool  ffbEnabled         = false;
+        bool  ffbInvertDirection = false;
+        bool  ffbOutputSignFlip  = false; // hardware-quirk flip; gates the final constForce sign at the SDK boundary
+        bool  ffbUseSpring       = true;  // when false, skips LogiPlaySpringForce (BeamNG-style pipeline)
+        int   torquePct          = 100;   // 0..100; reserved for future global multiplier hook
+        int   yawFeedbackPct     = 100;   // 0..100; multiplier on the spring component
+        int   activeTorquePct    = 100;   // 0..100; multiplier on the SAT + countersteer
+        float stationaryMps      = 0.5f;
+        bool  debugLogging       = false;
+    };
+
+    struct FfbDriverState
+    {
+        float steerNormalized    = 0.f;
+        float throttle           = 0.f;
+        float brake              = 0.f;
+        bool  isReversing        = false;
+        bool  isOnGround         = true;
+        float suspensionActivity = 0.f;   // rad-per-tick proxy (existing pipeline)
+        float lateralVelocityMps = 0.f;
+    };
+}
+
+namespace gwheel::tweakdb_physics { struct PerCarPhysics; }
+
+namespace gwheel::wheel
+{
+    void ApplyFfbFromPhysics(const gwheel::tweakdb_physics::PerCarPhysics& car,
+                             const FfbDriverState&                         driver,
+                             const FfbUserScalars&                         scalars);
 }

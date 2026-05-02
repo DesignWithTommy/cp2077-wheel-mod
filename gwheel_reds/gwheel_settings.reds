@@ -114,6 +114,30 @@ public class GWheelSettings extends IScriptable {
   @runtimeProperty("ModSettings.dependency", "hasFfbHardware")
   let stationaryThresholdMps: Float = 0.5;
 
+  @runtimeProperty("ModSettings.mod", "G-series Wheel")
+  @runtimeProperty("ModSettings.category", "Force feedback")
+  @runtimeProperty("ModSettings.category.order", "200")
+  @runtimeProperty("ModSettings.displayName", "Invert FFB direction")
+  @runtimeProperty("ModSettings.description", "Flip the sign of all restoring forces. Enable if your wheel pushes the wrong way under cornering.")
+  @runtimeProperty("ModSettings.dependency", "hasFfbHardware")
+  let ffbInvertDirection: Bool = false;
+
+  @runtimeProperty("ModSettings.mod", "G-series Wheel")
+  @runtimeProperty("ModSettings.category", "Force feedback")
+  @runtimeProperty("ModSettings.category.order", "200")
+  @runtimeProperty("ModSettings.displayName", "Reverse hardware FFB direction")
+  @runtimeProperty("ModSettings.description", "If your wheel snaps to full lock instead of centering when you start driving, enable this. Common on Logitech G HUB wheels (verified on G923) where the SDK's constant-force direction is reported opposite to documentation.")
+  @runtimeProperty("ModSettings.dependency", "hasFfbHardware")
+  let ffbOutputSignFlip: Bool = false;
+
+  @runtimeProperty("ModSettings.mod", "G-series Wheel")
+  @runtimeProperty("ModSettings.category", "Force feedback")
+  @runtimeProperty("ModSettings.category.order", "200")
+  @runtimeProperty("ModSettings.displayName", "Speed-sensitive stiffness")
+  @runtimeProperty("ModSettings.description", "On: wheel firms up at speed (sportscar-style steering assist). Off: pure tire-force feedback only, like BeamNG. The wheel goes light at rest and feels more raw at speed.")
+  @runtimeProperty("ModSettings.dependency", "hasFfbHardware")
+  let ffbUseSpring: Bool = true;
+
   // ---- Rev-strip LEDs -----------------------------------------------------
 
   @runtimeProperty("ModSettings.mod", "G-series Wheel")
@@ -572,6 +596,9 @@ public class GWheelSettings extends IScriptable {
     GWheel_SetStationaryThresholdMps(this.stationaryThresholdMps);
     GWheel_SetYawFeedbackPct(this.yawFeedbackPct);
     GWheel_SetActiveTorqueStrengthPct(this.activeTorqueStrengthPct);
+    GWheel_SetFfbInvertDirection(this.ffbInvertDirection);
+    GWheel_SetFfbOutputSignFlip(this.ffbOutputSignFlip);
+    GWheel_SetFfbUseSpring(this.ffbUseSpring);
 
     GWheel_SetHandshakePlayOnStart(this.handshakePlayOnStart);
 

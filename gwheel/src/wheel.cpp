@@ -3,6 +3,7 @@
 #include "device_table.h"
 #include "config.h"
 #include "input_bindings.h"
+#include "tweakdb_physics.h"
 
 #define DIRECTINPUT_VERSION 0x0800
 #include <windows.h>
@@ -823,25 +824,130 @@ namespace gwheel::wheel
             log::DebugF("[gwheel:ffb] jolt queued: kick=%+.3f dur=%dms", k, durationMs);
     }
 
-    void UpdateCenteringSpring(float absSpeedMps,
-                               float angVelMagRad,
-                               float suspensionActivity,
-                               float lateralVelocityMps,
-                               float steer,
-                               float throttle,
-                               float brake,
-                               bool  isReversing,
-                               bool  isOnGround,
-                               bool  enabled,
-                               float stationaryMps,
-                               float cruiseMps,
-                               float centeringBaseline,
-                               int   yawFeedbackPct,
-                               float yawRef,
-                               int   activeTorqueStrengthPct,
-                               bool  debugLog)
+    void ApplyFfbFromPhysics(const tweakdb_physics::PerCarPhysics& car,
+                             const FfbDriverState&                 driver,
+                             const FfbUserScalars&                 scalars)
     {
         using namespace centering_state;
+
+        static std::atomic<bool> s_bcEntry{true};
+        static std::atomic<bool> s_bcStationary{true};
+        static std::atomic<bool> s_bcMoving{true};
+        const bool bcEntry = s_bcEntry.exchange(false, std::memory_order_acq_rel);
+        if (bcEntry)
+            log::Debug("[gwheel:ffb-bisect] ApplyFfbFromPhysics ENTRY");
+        const bool breadcrumb = bcEntry; // legacy alias for derived-values block
+
+        // Unpack into the existing local-variable names so the body of the
+        // function reads like the legacy UpdateCenteringSpring. PhysicsData
+        // is the source of truth for live state; PerCarPhysics carries
+        // authored TweakDB values; the rest comes from the driver's input
+        // merge in vehicle_hook.cpp.
+        const float absSpeedMps        = car.speedMps;
+        const float angVelMagRad       = car.yawMagRadPerSec;
+        const float suspensionActivity = driver.suspensionActivity;
+        const float lateralVelocityMps = driver.lateralVelocityMps;
+        const float steer              = driver.steerNormalized;
+        const float throttle           = driver.throttle;
+        const float brake              = driver.brake;
+        const bool  isReversing        = driver.isReversing;
+        const bool  isOnGround         = driver.isOnGround;
+        const bool  enabled            = scalars.ffbEnabled
+                                       && car.kind != tweakdb_physics::ChassisKind::Unknown
+                                       && car.chainResolved
+                                       && car.liveStateValid;
+        const float stationaryMps      = scalars.stationaryMps;
+        const int   yawFeedbackPct     = scalars.yawFeedbackPct;
+        const int   activeTorqueStrengthPct = scalars.activeTorquePct;
+        const bool  debugLog           = scalars.debugLogging;
+        const bool  useSpring          = scalars.ffbUseSpring;
+
+        // Physics-derived per-vehicle quantities, replacing the legacy
+        // wheelbase-derived heuristics.
+        //
+        // cruiseMps was previously `5 + 5×wheelbase` (m/s where v² saturates).
+        // Now sourced from authored CDPR thresholds: TurnUpdateBaseSpeedThreshold
+        // is the speed where CDPR's mid-band turn-update curve takes over —
+        // the natural "moderate-cruise" speed for this chassis. Falls back
+        // to a sensible 18 m/s when the snapshot didn't resolve.
+        const float cruiseMps = (car.turnUpdateBaseSpeedThreshold > 1.f)
+                                    ? car.turnUpdateBaseSpeedThreshold * 2.f
+                                    : 18.f;
+
+        // centeringBaseline was the per-car peak spring coefficient at
+        // cruise, derived from wheelbase. Now derived from chassisMass
+        // (heavier chassis → stiffer wheel at speed). Sport bike ~380 kg
+        // -> 0.71; sports car ~1400 kg -> 0.91; truck ~3500 kg -> 1.0.
+        const float massForBaseline = (car.chassisMass > 50.f) ? car.chassisMass : 1400.f;
+        const float centeringBaseline = std::clamp(0.65f + massForBaseline / 14000.f,
+                                                   0.5f, 1.0f);
+
+        // yawRef was the per-car turnRate (rad/s yaw threshold). The native
+        // turnRate field is on vehicleWheeledPhysics which isn't RTTI-visible;
+        // we derive an equivalent from authored MaxWheelTurnDeg (steady-state
+        // yaw rate at full lock at cruise speed for this chassis).
+        // yaw_max ≈ tan(maxTurnDeg) × cruise / wheelbase, but wheelbase isn't
+        // in PerCarPhysics either. Approximate: yawRef ≈ MaxWheelTurnDeg / 30
+        // gives 1.67 rad/s for a 50° max-turn sports car, 1.07 rad/s for a
+        // 32° max-turn truck — matches the inner-probe values measured before.
+        const float yawRef = (car.maxWheelTurnDeg > 1.f)
+                                 ? std::clamp(car.maxWheelTurnDeg / 30.f, 0.5f, 5.f)
+                                 : 1.5f;
+
+        // Bike-specific lean estimation. Steady-state cornering lean angle is
+        // tan(lean) = v² / (g·R), or equivalently lean ≈ atan(v·ω / g) where
+        // ω is yaw rate. We use that as a proxy: at 15 m/s and 0.6 rad/s yaw,
+        // lean ≈ atan(9/9.81) ≈ 0.74 rad ≈ 42° — matches a moderately-leaned
+        // sport bike. bikeMaxTilt is the authored max lean (typically 0.7
+        // rad ≈ 40° for sport bikes); we normalise the proxy against it to
+        // get a 0..1 "how leaned over am I" fraction. Cars and Unknown set
+        // bikeLeanFraction=0 so the bike-specific multipliers below collapse
+        // to no-ops on those branches.
+        const bool kIsBike = (car.kind == tweakdb_physics::ChassisKind::Bike);
+        const bool kIsCar  = (car.kind == tweakdb_physics::ChassisKind::Car);
+        float bikeLeanFraction = 0.f;
+        if (kIsBike)
+        {
+            const float bikeMaxTilt   = (car.bikeMaxTilt > 0.05f) ? car.bikeMaxTilt : 0.7f;
+            // Prefer authored bikeCurrentTilt from BikePhysics offset probe.
+            // Fall back to v×ω/g lean proxy when the offset read drifted out
+            // of domain (caught by ValidateInDomain).
+            const float leanRad = car.bikeLiveValid
+                ? std::fabs(car.bikeCurrentTilt)
+                : std::atan(absSpeedMps * angVelMagRad / 9.81f);
+            bikeLeanFraction = std::clamp(leanRad / bikeMaxTilt, 0.f, 1.f);
+        }
+
+        // Perfect-steering attenuation. CDPR's perfectSteeringFactor blends the
+        // authored turn-update curve toward a "perfect" target steering output —
+        // at high values the game forces the car onto the ideal line regardless
+        // of input, the same way driver-assist systems do. From the rim's
+        // perspective the chassis is fighting the driver's hand less, so SAT
+        // should feel lighter. Cars only; bikes don't expose this field and
+        // tanks fall through Unknown.
+        // Linear attenuation: factor 0 -> full SAT, factor 1 -> 50% SAT.
+        // Range chosen so even a max-perfect-steer car still has clearly-felt
+        // push-back, just lighter than a raw chassis like a muscle car.
+        const float carPerfectSteerMul = kIsCar
+            ? (1.f - 0.5f * std::clamp(car.perfectSteeringFactor, 0.f, 1.f))
+            : 1.f;
+        // Spring multiplier: bikes don't self-center while leaned. At full
+        // tilt the centering spring goes to 15% of upright; upright bikes
+        // and all other chassis kinds keep the full spring. The factor was
+        // picked so the wheel still has SOME centering tendency at deep
+        // lean (otherwise it flops free and feels broken).
+        const float bikeSpringMul = kIsBike ? (1.f - 0.85f * bikeLeanFraction) : 1.f;
+        // Active-torque multiplier: tilt-limit lightening. As the bike
+        // approaches max lean, peak grip drops and SAT goes lighter. Caps
+        // at 50% reduction so there's still felt push-back at the edge.
+        const float bikeTiltLightenMul = kIsBike ? (1.f - 0.5f * bikeLeanFraction) : 1.f;
+        // Countersteer-gain multiplier: bikes counter-steer (push the bars
+        // in the direction of lean to initiate the turn) — the existing
+        // car countersteer math points the right way for bikes too because
+        // lateral velocity and lean direction agree, but the effect should
+        // be stronger so the bike wants to follow its own line. Doubled on
+        // bike, unchanged on car.
+        const float bikeCountersteerMul = kIsBike ? 2.0f : 1.f;
 
         // Heartbeat for the pump-thread pause watchdog. If this tick count
         // stops advancing (vehicle detour stopped firing — pause, unmount),
@@ -865,8 +971,21 @@ namespace gwheel::wheel
         const float rangeScale = std::clamp(180.f / static_cast<float>(ghubRange),
                                             0.3f, 1.5f);
 
+        if (breadcrumb)
+            log::DebugF("[gwheel:ffb-bisect] derived: cruise=%.2f base=%.3f yawRef=%.3f range=%d enabled=%d isOnGround=%d moving=%d",
+                       cruiseMps, centeringBaseline, yawRef, ghubRange,
+                       enabled ? 1 : 0, isOnGround ? 1 : 0,
+                       (absSpeedMps > stationaryMps) ? 1 : 0);
+
         auto& st = S();
-        if (!st.ready.load() || !st.hasFFB.load()) return;
+        if (!st.ready.load() || !st.hasFFB.load())
+        {
+            if (breadcrumb)
+                log::Debug("[gwheel:ffb-bisect] early-return: !ready or !hasFFB");
+            return;
+        }
+        if (breadcrumb)
+            log::Debug("[gwheel:ffb-bisect] past readiness check");
 
         // Helper lambdas so the early-return and airborne paths can tear
         // down the same set of effects without code duplication.
@@ -887,6 +1006,8 @@ namespace gwheel::wheel
         // wheel doesn't feel weirdly heavy while the car is flying.
         if (enabled && !isOnGround)
         {
+            if (breadcrumb)
+                log::Debug("[gwheel:ffb-bisect] airborne path");
             stopContactEffects();
             if (!s_airborneOn.exchange(true, std::memory_order_acq_rel))
             {
@@ -894,6 +1015,8 @@ namespace gwheel::wheel
                 if (debugLog)
                     log::DebugF("[gwheel:ffb] airborne BEGIN (speed=%.2f)", absSpeedMps);
             }
+            if (breadcrumb)
+                log::Debug("[gwheel:ffb-bisect] airborne path RETURN");
             return;
         }
 
@@ -909,17 +1032,29 @@ namespace gwheel::wheel
 
         if (!enabled || !moving)
         {
+            const bool bcStat = s_bcStationary.exchange(false, std::memory_order_acq_rel);
+            if (bcStat)
+                log::DebugF("[gwheel:ffb-bisect] stationary path entry (speed=%.3f stationary=%.3f)",
+                           absSpeedMps, stationaryMps);
             const int prevS = s_lastCoefPct.load(std::memory_order_acquire);
             const int prevC = s_lastConstPct.load(std::memory_order_acquire);
             const int prevD = s_lastDamperPct.load(std::memory_order_acquire);
             const int prevB = s_lastBumpyPct.load(std::memory_order_acquire);
             stopContactEffects();
+            if (bcStat)
+                log::Debug("[gwheel:ffb-bisect] stationary path past stopContactEffects");
 
             if (debugLog && (prevS >= 0 || prevC != INT_MIN || prevD >= 0 || prevB >= 0))
                 log::DebugF("[gwheel:ffb] centering OFF (speed=%.2f reversing=%d enabled=%d) prevS=%d%% prevC=%d%% prevD=%d%% prevB=%d%%",
                             absSpeedMps, isReversing ? 1 : 0, enabled ? 1 : 0, prevS, prevC, prevD, prevB);
+            if (bcStat)
+                log::Debug("[gwheel:ffb-bisect] stationary path RETURN");
             return;
         }
+        const bool bcMove = s_bcMoving.exchange(false, std::memory_order_acq_rel);
+        if (bcMove)
+            log::DebugF("[gwheel:ffb-bisect] active body ENTER speed=%.3f yawMag=%.4f throttle=%.2f brake=%.2f latV=%+.2f",
+                       absSpeedMps, std::fabs(angVelMagRad), throttle, brake, lateralVelocityMps);
 
         // --- Speed component: v² normalized to per-car cruise ------------
         // Used by the spring (for static heaviness) and the damper (to scale
@@ -951,16 +1086,38 @@ namespace gwheel::wheel
         // This naturally embeds v² (steady-state yaw scales with v, so
         // yaw×v ≈ v² × tan(steer)/wheelbase) — no separate v² term needed
         // on the active torque.
-        const float loadFactor = std::clamp(
-            (yawMag * absSpeedMps) / (yawRefSafe * cruiseSafe),
-            0.f, 1.5f);
+        // Yaw-driven lateral acceleration is the physical SAT signal but it
+        // collapses to zero on straight-line cruise. Real wheels still return
+        // to center on straight roads (caster trail + driveline rigidity), so
+        // we floor loadFactor with a speed-driven baseline. In a turn the yaw
+        // term dominates and behavior is unchanged from the pure-SAT model;
+        // in straight cruise the floor provides active centering pull. The
+        // floor uses the same multiplier path as the yaw term, so the
+        // direction sign is whatever the existing SAT term uses (no new
+        // directional convention introduced).
+        const float yawLateral   = (yawMag * absSpeedMps) / (yawRefSafe * cruiseSafe);
+        // Speed floor at the loadFactor cap (1.5) so the SAT term saturates
+        // whenever the car is at cruise speed, regardless of yaw rate. This
+        // gives strong always-on centering at speed.
+        const float speedFloor   = std::clamp(speedSq, 0.f, 1.f) * 1.5f;
+        const float loadFactor   = std::clamp(std::max(yawLateral, speedFloor),
+                                              0.f, 1.5f);
 
         // --- Fore-aft load transfer --------------------------------------
         // Braking loads the fronts (more normal force → more lateral grip
-        // → more SAT). Throttle slightly unloads the fronts. Coefficients
-        // are rough but capture the directional feel.
-        const float weightMul = std::clamp(1.f + 0.3f * brake - 0.05f * throttle,
-                                           0.5f, 1.5f);
+        // → more SAT). Throttle slightly unloads the fronts. The brake-side
+        // coefficient is now authored per-vehicle from CDPR's
+        // forwardWeightTransferFactor (typically 0.3 for sports cars, 0.8+
+        // for trucks — heavier chassis shifts more load). Throttle term
+        // stays heuristic at -0.05 (no authored counterpart in the chain
+        // we walk).
+        const float fwdWt = (car.forwardWeightTransferFactor > 0.05f)
+                                ? car.forwardWeightTransferFactor : 0.3f;
+        // Brake loads the fronts (more SAT). Throttle is intentionally NOT
+        // reduced here — physically it'd unload the fronts a bit, but the
+        // perceived-correct behavior is "wheel centers harder under throttle"
+        // (matches driver intuition that the car wants to go straight).
+        const float weightMul = std::clamp(1.f + fwdWt * brake, 1.0f, 1.5f);
 
         const float reverseMul = isReversing ? kReverseMul : 1.f;
 
@@ -973,60 +1130,134 @@ namespace gwheel::wheel
         float coef = (baseline * speedSq
                     + yawRamp * (static_cast<float>(yawFeedbackPct) / 100.f))
                    * gripFactor;
-        coef *= reverseMul * rangeScale;
+        coef *= reverseMul * rangeScale * bikeSpringMul;
         coef = std::clamp(coef, 0.f, 1.f);
 
+
         const int coefPct = std::clamp(static_cast<int>(std::lround(coef * 100.f)), 0, 100);
-        const int prevS   = s_lastCoefPct.load(std::memory_order_acquire);
-        if (prevS < 0 || std::abs(coefPct - prevS) >= 5)
+        if (bcMove)
+            log::DebugF("[gwheel:ffb-bisect] post-spring math: coef=%.4f coefPct=%d gripFactor=%.3f loadFactor=%.3f weightMul=%.3f rangeScale=%.3f",
+                       coef, coefPct, gripFactor, loadFactor, weightMul, rangeScale);
+        // BeamNG-style mode: skip the SDK spring entirely. The constForce
+        // term below provides centering instead. When useSpring is false,
+        // we ensure the spring is stopped (in case it was previously playing
+        // from a config change mid-session) and skip the play call.
+        const int prevS = s_lastCoefPct.load(std::memory_order_acquire);
+        if (!useSpring)
         {
+            if (prevS >= 0)
+            {
+                StopSpring();
+                s_lastCoefPct.store(-1, std::memory_order_release);
+            }
+        }
+        else if (prevS < 0 || std::abs(coefPct - prevS) >= 5)
+        {
+            if (bcMove)
+                log::DebugF("[gwheel:ffb-bisect] PRE PlaySpring(%.4f)", coef);
             PlaySpring(coef);
+            if (bcMove)
+                log::Debug("[gwheel:ffb-bisect] POST PlaySpring");
             s_lastCoefPct.store(coefPct, std::memory_order_release);
         }
 
         // --- Active alignment torque: humped over deflection, driven by load
-        // Shape: sqrt(|steer|) × (1 − steer⁴). Peak ~0.67 at |steer|=0.54.
-        // Strong force at small deflections (sqrt), rolls off toward full
-        // lock (^4 term falls fast past 60%) — tires at the slip limit
-        // produce less SAT, not more.
+        // Shape: |steer| × (1 − steer⁴). Linear in deflection near zero so
+        // constForce is small at small deflections (lets the spring handle
+        // near-center centering without the active term causing ringing).
+        // The (1 − steer⁴) term still rolls off past ~60% so tires at the
+        // slip limit produce less SAT, not more. Peak ~0.50 at |steer|=0.67.
+        //
+        // Earlier sqrt(|steer|) shape was rejected: it produced a 10%-shape
+        // value at just 1% deflection, so even a tiny accidental nudge
+        // off-center triggered a hard centering kick. With damper at 40%
+        // that's not enough to absorb the resulting overshoot, and the
+        // wheel ends up oscillating across center — perceived as a "hill
+        // at center, wants to roll off either side" feel (testing 2026-05-01).
         const float steerMag   = std::fabs(steer);
         const float signSteer  = (steer > 0.f) ? 1.f : (steer < 0.f ? -1.f : 0.f);
         const float steerSq    = steerMag * steerMag;
-        const float steerShape = std::sqrt(steerMag) * (1.f - steerSq * steerSq);
+        const float steerShape = steerMag * (1.f - steerSq * steerSq);
 
         float constForce = -signSteer * steerShape * loadFactor * gripFactor * weightMul
                          * (static_cast<float>(activeTorqueStrengthPct) / 100.f);
-        constForce *= reverseMul * rangeScale;
+        constForce *= reverseMul * rangeScale * bikeTiltLightenMul * carPerfectSteerMul;
 
         // --- Slip-angle countersteer nudge --------------------------------
         // Past peak slip real SAT flips sign and pulls the steering wheel
         // toward the direction of travel — the "self-correcting" pull that
         // teaches drivers to countersteer instinctively. The effect scales
-        // with slip angle (approximated here by lateral velocity in the
-        // car's local frame) and with how much grip has been lost.
+        // with slip angle and with how much grip has been lost.
+        //
+        // For bikes we now have the authored chassis transversalForce signal
+        // straight from BikePhysics — physically correct lateral force in N,
+        // sign-flipping with cornering direction. Cars and unmatched kinds
+        // still use the lateralVelocityMps proxy (slip-angle approximation).
         //
         // gripFactor == 1 (grip) → no contribution.
-        // gripFactor < 1 (slide) → force proportional to |lateralVel|,
-        //   in the direction of lateralVel (positive = sliding rightward
+        // gripFactor < 1 (slide) → force proportional to |signal|,
+        //   in the direction of signal (positive = sliding rightward
         //   → wheel pulled rightward, which IS countersteer for a
         //   right-side slide; the driver's natural "follow the wheel"
         //   response yields correct opposite-lock steering).
         //
-        // 6 m/s of lateral velocity saturates the contribution; cap at
-        // 70% so the wheel can still be held / controlled during the
-        // biggest drifts. activeTorquePct scales with the rest of the
-        // active torque so user tuning affects this uniformly.
-        constexpr float kLatVelSaturate = 6.0f;
-        constexpr float kCountersteerGain = 0.70f;
-        const float deadband   = 0.5f;  // don't trigger below slight slide
-        const float slipMag    = std::max(0.f, std::fabs(lateralVelocityMps) - deadband);
-        const float slipSign   = (lateralVelocityMps > 0.f) ? 1.f : -1.f;
-        const float slipNorm   = std::clamp(slipMag / kLatVelSaturate, 0.f, 1.f);
+        // Bikes saturate at ±50 N transversal; cars use the existing 6 m/s
+        // saturation on the lateralVel proxy. activeTorquePct scales with
+        // the rest of the active torque so user tuning affects uniformly.
+        constexpr float kLatVelSaturate         = 6.0f;
+        constexpr float kBikeTransversalSat     = 50.0f;
+        constexpr float kCountersteerGain       = 0.70f;
+
+        float slipSignal;
+        float slipSat;
+        float slipDeadband;
+        if (kIsBike && car.bikeLiveValid)
+        {
+            slipSignal   = car.bikeTransversalForce;
+            slipSat      = kBikeTransversalSat;
+            slipDeadband = 5.0f; // newtons; ignore micro-twitches in the chassis force
+        }
+        else
+        {
+            slipSignal   = lateralVelocityMps;
+            slipSat      = kLatVelSaturate;
+            slipDeadband = 0.5f;
+        }
+        const float slipMag    = std::max(0.f, std::fabs(slipSignal) - slipDeadband);
+        const float slipSign   = (slipSignal > 0.f) ? 1.f : -1.f;
+        const float slipNorm   = std::clamp(slipMag / slipSat, 0.f, 1.f);
         const float counterForce = slipSign * slipNorm * (1.f - gripFactor)
                                  * kCountersteerGain
                                  * (static_cast<float>(activeTorqueStrengthPct) / 100.f)
-                                 * reverseMul * rangeScale;
+                                 * reverseMul * rangeScale * bikeCountersteerMul;
         constForce += counterForce;
+
+        // --- Lean-into-corner (Step 8b, cars only) ------------------------
+        // Real cars produce a small lateral pull in the direction of body
+        // roll during high-load cornering — the chassis leans into the turn
+        // and the steering rack picks up a sympathetic load. Drives off
+        // CarPhysics.veh_bank_body_l_r (read at 0xE38, signed normalized
+        // roll). Per-vehicle character via authored bankBodyLRTanMultiplier.
+        //
+        // Direction: sign(carBankBodyLR). Negative on left turn → negative
+        // FFB direction → rim pulls left, reinforcing the existing left
+        // SAT signal. Magnitude bounded so this is a flavor term, not a
+        // dominant force; max ~10% of full active torque under heaviest
+        // cornering loads.
+        if (kIsCar && car.carLiveValid)
+        {
+            constexpr float kLeanGain      = 0.30f;
+            constexpr float kLeanMaxOutput = 0.10f;
+            const float bank      = car.carBankBodyLR;
+            const float bankMul   = (car.bankBodyLRTanMultiplier > 0.01f)
+                                        ? car.bankBodyLRTanMultiplier : 0.12f;
+            const float leanSign  = (bank > 0.f) ? 1.f : -1.f;
+            const float leanForce = leanSign * std::clamp(std::fabs(bank) * bankMul * kLeanGain,
+                                                          0.f, kLeanMaxOutput)
+                                  * (static_cast<float>(activeTorqueStrengthPct) / 100.f)
+                                  * reverseMul * rangeScale;
+            constForce += leanForce;
+        }
 
         // Jolt overlay. A collision / bump event queues a linearly-decaying
         // kick; overlay it onto constForce for the jolt's duration. Only
@@ -1054,19 +1285,43 @@ namespace gwheel::wheel
             }
         }
 
+        // Hardware sign-flip for LogiPlayConstantForce direction convention.
+        // Some Logitech wheels (verified G923, 2026-05-01) interpret
+        // `LogiPlayConstantForce(idx, +pct)` as a CCW push, opposite to the
+        // typically-documented convention (positive = CW). When that's the
+        // case, the formula above (which assumes standard convention)
+        // produces values that drive the wheel AWAY from center. The user
+        // enables outputSignFlip in Mod Settings to fix it on their wheel.
+        // Default off, so wheels with the standard convention are unaffected.
+        if (scalars.ffbOutputSignFlip)
+            constForce = -constForce;
+
+        // User-facing direction toggle. Independent of outputSignFlip; flips
+        // both the input and output direction so wheel-right means car-left
+        // (driver preference / inversion).
+        if (scalars.ffbInvertDirection)
+            constForce = -constForce;
+
         constForce = std::clamp(constForce, -1.f, 1.f);
 
         const int constPct = std::clamp(static_cast<int>(std::lround(constForce * 100.f)), -100, 100);
+        if (bcMove)
+            log::DebugF("[gwheel:ffb-bisect] post-active math: constForce=%+.4f constPct=%d steerShape=%.4f signSteer=%+.0f counterForce=%+.4f",
+                       constForce, constPct, steerShape, signSteer, counterForce);
         const int prevC    = s_lastConstPct.load(std::memory_order_acquire);
         if (prevC == INT_MIN || std::abs(constPct - prevC) >= 5)
         {
             if (constPct == 0 && prevC != INT_MIN)
             {
+                if (bcMove) log::Debug("[gwheel:ffb-bisect] PRE StopConstant");
                 StopConstant();
+                if (bcMove) log::Debug("[gwheel:ffb-bisect] POST StopConstant");
             }
             else
             {
+                if (bcMove) log::DebugF("[gwheel:ffb-bisect] PRE PlayConstant(%+.4f)", constForce);
                 PlayConstant(constForce);
+                if (bcMove) log::Debug("[gwheel:ffb-bisect] POST PlayConstant");
             }
             s_lastConstPct.store(constPct, std::memory_order_release);
         }
@@ -1079,22 +1334,39 @@ namespace gwheel::wheel
         // Damper also respects gripFactor — rack + tire damping comes from
         // loaded tires; in a drift the tires aren't loaded, the wheel
         // should flick easily against countersteer.
+        //
+        // Kept moderate (0.4 scaling, 0.5 ceiling). Heavy damping interacts
+        // badly with the G923's near-center cogging detents: the wheel can
+        // settle into a detent off-center because the centering forces
+        // can't drag through the combined damper-resistance + detent-torque.
+        // That manifested as a "hill at center, rolls off either side"
+        // feel during testing 2026-05-01. Stiffness-at-speed is now driven
+        // by the loadFactor speed floor on the directional SAT term instead.
         const float damperCoef = std::clamp(speedSq * 0.4f * gripFactor * reverseMul * rangeScale,
                                             0.f, 0.5f);
         const int damperPct    = std::clamp(static_cast<int>(std::lround(damperCoef * 100.f)), 0, 100);
+        if (bcMove)
+            log::DebugF("[gwheel:ffb-bisect] damper math: damperCoef=%.4f damperPct=%d speedSq=%.4f",
+                       damperCoef, damperPct, speedSq);
         const int prevD        = s_lastDamperPct.load(std::memory_order_acquire);
         if (prevD < 0 || std::abs(damperPct - prevD) >= 5)
         {
             if (damperPct == 0 && prevD > 0)
             {
+                if (bcMove) log::Debug("[gwheel:ffb-bisect] PRE StopDamper");
                 StopDamper();
+                if (bcMove) log::Debug("[gwheel:ffb-bisect] POST StopDamper");
             }
             else
             {
+                if (bcMove) log::DebugF("[gwheel:ffb-bisect] PRE PlayDamper(%.4f)", damperCoef);
                 PlayDamper(damperCoef);
+                if (bcMove) log::Debug("[gwheel:ffb-bisect] POST PlayDamper");
             }
             s_lastDamperPct.store(damperPct, std::memory_order_release);
         }
+        if (bcMove)
+            log::Debug("[gwheel:ffb-bisect] active body PAST damper section");
 
         // --- Road surface: driven by suspension activity ----------------
         // Real controller rumble on CP2077 reacts to what's under each
@@ -1152,19 +1424,27 @@ namespace gwheel::wheel
         const float combined     = std::max(env, surfBaseline);
         const float bumpyMag     = std::clamp(combined * rangeScale, 0.f, kSurfacePeakMag);
         const int bumpyPct   = std::clamp(static_cast<int>(std::lround(bumpyMag * 100.f)), 0, 100);
+        if (bcMove)
+            log::DebugF("[gwheel:ffb-bisect] surface math: bumpyMag=%.4f bumpyPct=%d", bumpyMag, bumpyPct);
         const int prevB      = s_lastBumpyPct.load(std::memory_order_acquire);
         if (prevB < 0 || std::abs(bumpyPct - prevB) >= 2)
         {
             if (bumpyPct == 0 && prevB > 0)
             {
+                if (bcMove) log::Debug("[gwheel:ffb-bisect] PRE StopRoadSurface");
                 StopRoadSurface();
+                if (bcMove) log::Debug("[gwheel:ffb-bisect] POST StopRoadSurface");
             }
             else if (bumpyPct > 0)
             {
+                if (bcMove) log::DebugF("[gwheel:ffb-bisect] PRE PlayRoadSurface(%.4f, %dms)", bumpyMag, kSurfacePeriodMs);
                 PlayRoadSurface(bumpyMag, kSurfacePeriodMs);
+                if (bcMove) log::Debug("[gwheel:ffb-bisect] POST PlayRoadSurface");
             }
             s_lastBumpyPct.store(bumpyPct, std::memory_order_release);
         }
+        if (bcMove)
+            log::Debug("[gwheel:ffb-bisect] active body RETURN");
 
         static std::atomic<uint64_t> s_sampleTicks{0};
         const uint64_t sampleN = s_sampleTicks.fetch_add(1, std::memory_order_relaxed) + 1;

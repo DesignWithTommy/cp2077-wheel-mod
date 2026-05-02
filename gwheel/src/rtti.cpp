@@ -7,6 +7,7 @@
 #include "logging.h"
 #include "rtti_dump.h"
 #include "rtti_offsets.h"
+#include "tweakdb_physics.h"
 #include "sources.h"
 #include "device_table.h"
 
@@ -441,6 +442,15 @@ namespace gwheel::rtti
             RegisterGlobal(rtti, "GWheel_SetActiveTorqueStrengthPct",
                            reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetInt<&config::SetActiveTorqueStrengthPct>),
                            "Bool", {{ "Int32", "pct" }});
+            RegisterGlobal(rtti, "GWheel_SetFfbInvertDirection",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetBool<&config::SetFfbInvertDirection>),
+                           "Bool", {{ "Bool", "v" }});
+            RegisterGlobal(rtti, "GWheel_SetFfbOutputSignFlip",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetBool<&config::SetFfbOutputSignFlip>),
+                           "Bool", {{ "Bool", "v" }});
+            RegisterGlobal(rtti, "GWheel_SetFfbUseSpring",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetBool<&config::SetFfbUseSpring>),
+                           "Bool", {{ "Bool", "v" }});
 
             RegisterGlobal(rtti, "GWheel_SetLedEnabled",
                            reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetBool<&config::SetLedEnabled>),
@@ -499,6 +509,14 @@ namespace gwheel::rtti
             // by asking the game itself where each field lives. See
             // rtti_offsets.cpp for what gets resolved.
             rtti_offsets::Init();
+
+            // Resolve the TweakDB record classes that authored physics
+            // values live on. The native vehicleWheeledPhysics / CarPhysics
+            // / BikePhysics structs are NOT RTTI-visible, so authored values
+            // are read from the TweakDB side via these record classes.
+            // See tweakdb_physics.cpp for the resolution + first-encounter
+            // property dumps that operators (and Claude) read in the log.
+            tweakdb_physics::Init();
 
             // BISECT: RTTI dump disabled. Still registering natives above;
             // just skipping the full class enumeration pass.

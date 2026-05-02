@@ -60,6 +60,8 @@ I recommend starting with an operating range of 180 to start, since the rotation
 - **Settings page is missing.** Mod Settings or ArchiveXL aren't installed correctly. The wheel will still work on defaults.
 - **Three orphan toggles named `hasFfbHardware` / `hasRevLeds` / `hasRightCluster` show up in settings.** Vortex installed stock Mod Settings on top of the patched build that ships with this mod. Re-deploy in Vortex and let this mod win the file conflict.
 - **Doubled keypresses on D-pad or A/B/X/Y.** G HUB and this mod are both binding the same keys. Reset the wheel-button entries in your G HUB Cyberpunk profile back to their default bindings.
+- **Wheel rolls *away* from center instead of recovering, or fights you back into the turn under load.** Open Mod Settings → G-series Wheel → Force feedback and enable **Hardware sign flip (G923 quirk)**. This is a known Logitech-wide issue (G29/G920/G923/G27/G25/Driving Force/Momo) where some unit/firmware/G HUB combinations interpret the SDK's constant-force direction opposite to what's documented. Forza, iRacing, and most other sim titles expose the same toggle.
+- **Wheel feels too stiff or too floppy at speed.** **Speed-sensitive stiffness** in Force feedback settings controls this. On (default): wheel firms up at speed (sportscar-style steering assist). Off: pure tire-force feedback only, like BeamNG — wheel goes light at rest and feels more raw at speed.
 
 ## Credits
 

@@ -12,6 +12,7 @@ set(GWHEEL_SOURCES
   src/rtti.cpp
   src/rtti_dump.cpp
   src/rtti_offsets.cpp
+  src/tweakdb_physics.cpp
   src/logging.cpp
   src/audio_monitor.cpp
   src/led.cpp
@@ -33,6 +34,7 @@ set(GWHEEL_HEADERS
   src/rtti.h
   src/rtti_dump.h
   src/rtti_offsets.h
+  src/tweakdb_physics.h
   src/audio_monitor.h
   src/led.h
   src/mod_settings_seed.h
