@@ -9,8 +9,8 @@ namespace gwheel
     inline constexpr const wchar_t* kPluginAuthor = L"Grant Perdue";
     inline constexpr int kVersionMajor = 2;
     inline constexpr int kVersionMinor = 31;
-    inline constexpr int kVersionPatch = 0;
-    inline constexpr const char* kVersionString = "2.31.0";
+    inline constexpr int kVersionPatch = 1;
+    inline constexpr const char* kVersionString = "2.31.1";
 
     struct PluginContext
     {

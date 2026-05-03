@@ -1,6 +1,6 @@
 # Cyberpunk 2077 — Logitech G-series Steering Wheel Mod
 
-**v2.31.0** for Cyberpunk 2077 game patch 2.31.
+**v2.31.1** for Cyberpunk 2077 game patch 2.31.
 
 Drive Cyberpunk 2077 with a Logitech G-series steering wheel. Your wheel handles steering, throttle, and brake. Force feedback fires from in-game physics (centering as you turn, cornering load, surface texture, collision jolts, slip when you lose grip). Rev-strip LEDs follow real engine RPM. When the in-car radio is on, the rev strip becomes a music visualizer.
 

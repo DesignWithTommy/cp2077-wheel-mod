@@ -1,13 +1,13 @@
 # Nexus Upload Cheatsheet
 
-Reference for filling out the Nexus mod-upload form for v2.31.0. Settings on this page are entered through the Nexus UI when you create / edit the mod page; they are not part of the zip.
+Reference for filling out the Nexus mod-upload form for v2.31.1. Settings on this page are entered through the Nexus UI when you create / edit the mod page; they are not part of the zip.
 
 ## Page metadata
 
 | Field | Value |
 | --- | --- |
 | **Mod Name** | `Logitech G-series Steering Wheel` |
-| **Version** | `2.31.0` |
+| **Version** | `2.31.1` |
 | **Game** | Cyberpunk 2077 |
 | **Category** | Vehicles (or Gameplay if Vehicles isn't accepted; this mod doesn't fit Modders Resources) |
 | **Author** | Grant Perdue |
@@ -78,15 +78,15 @@ In the **Credits** section, list:
 Upload the FOMOD zip:
 
 ```
-dist/gwheel-2.31.0.zip
+dist/gwheel-2.31.1.zip
 ```
 
 In the file's metadata:
 
 - **File name**: `Logitech G-series Wheel Mod`
-- **File version**: `2.31.0`
+- **File version**: `2.31.1`
 - **Category**: `Main Files`
-- **Description**: `Full mod, FOMOD installer. v2.31.0 for game patch 2.31.`
+- **Description**: `Full mod, FOMOD installer. v2.31.1 for game patch 2.31.`
 
 ## Images (need at least one)
 

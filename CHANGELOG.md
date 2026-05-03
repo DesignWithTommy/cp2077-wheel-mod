@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.31.1 — 2026-05-03
+
+### Bindings UX
+
+- Every wheel-button binding is now a press-to-bind slot wired through Mod Settings' new `InputBinding` primitive. Each slot accepts two bindings (dual-keybinding pair widget), so two wheel buttons can drive the same in-game action.
+- Bindings are action-keyed: settings list each in-game action ("Horn", "Open map", "Shoot primary"...) and you assign wheel buttons to it, instead of choosing an action per physical button.
+- Defaults are intentionally empty. New users bind from scratch; the `Steering & pedals` section is the first thing to set up. The previous D-pad-to-Menu defaults are gone.
+- New categories: Steering & pedals, Driving, Camera, Combat, Weapons, Radio, Gameplay, Menus, Menu navigation. The old single Button bindings / Lower-cluster bindings sections are retired.
+
+### Wheel input
+
+- Steering deadzone (0-15%) filters small wheel-center jitter so the car doesn't drift when your hands are off the wheel.
+- Response curve: Default (linear), Subdued (relaxed near center), Sharp (tight near center).
+- Invert steering: reverse the wheel's steering direction for inverted-mount setups. FFB follows automatically.
+- `Treat clutch as brake` is removed; bind your clutch axis to the Brake action instead.
+
+### Force feedback
+
+- Renamed `Hardware sign flip (G923 quirk)` to `Invert FFB direction` for clarity.
+- Added `Speed-sensitive stiffness` toggle: on (default) firms the wheel up at speed (sportscar-style assist); off is pure tire-force feedback (BeamNG-like).
+
+### Physics
+
+- Per-vehicle physics readout (turn rate, wheelbase, wheel grip) now goes through TweakDB record lookup with a per-mount cache, replacing the previous live-RTTI struct walk for the values TweakDB authors. Per-tick state still uses hardcoded struct offsets.
+
+### Distribution / packaging
+
+- FOMOD installer pre-warns about the four-file Mod Settings conflict (`mod_settings.dll`, `packed.reds`, `ModSettings.archive`, `ModSettings.archive.xl`) on its first page, so users know what to pick before Vortex shows the deploy-time prompt.
+- Zip-mode `deploy.ps1` now ships the patched mod_settings `packed.reds`, `ModSettings.archive`, and `ModSettings.archive.xl`, plus `gwheel_input_provider.reds`. Without these, the new press-to-bind UI never compiled in-game on Vortex installs (direct-deploy was unaffected).
+
 ## 2.31.0 — 2026-04-25
 
 First public release. Tested against Cyberpunk 2077 patch 2.31 (build 5294808).

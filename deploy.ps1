@@ -45,7 +45,7 @@ function Fail($msg)    {
 
 # ---------- version ---------------------------------------------------------
 
-$version = "2.31.0"
+$version = "2.31.1"
 try {
   $modInfo = Get-Content -Raw "mod_info.json" | ConvertFrom-Json
   if ($modInfo.version) { $version = $modInfo.version }
