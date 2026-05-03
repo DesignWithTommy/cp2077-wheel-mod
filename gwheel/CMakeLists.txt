@@ -44,14 +44,14 @@ add_library(gwheel SHARED
   ${GWHEEL_HEADERS}
 )
 
-# Logitech Steering Wheel SDK (vendored under vendor/LogitechSDK_unpacked/).
-set(LOGI_SDK_ROOT "${CMAKE_SOURCE_DIR}/vendor/LogitechSDK_unpacked")
+# Logitech Steering Wheel SDK (vendored under vendor/LogitechSDK/).
+set(LOGI_SDK_ROOT "${CMAKE_SOURCE_DIR}/vendor/LogitechSDK")
 set(LOGI_SDK_INCLUDE_DIR "${LOGI_SDK_ROOT}/Include")
 set(LOGI_SDK_LIB "${LOGI_SDK_ROOT}/Lib/x64/LogitechSteeringWheelLib.lib")
 if(NOT EXISTS "${LOGI_SDK_LIB}")
   message(FATAL_ERROR
     "Logitech SDK import lib not found at ${LOGI_SDK_LIB}. "
-    "Ensure vendor/LogitechSDK_unpacked/ is present.")
+    "Ensure vendor/LogitechSDK/ is present.")
 endif()
 
 target_include_directories(gwheel

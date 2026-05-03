@@ -532,7 +532,7 @@ namespace gwheel::wheel
 
             // Deliberately NOT calling LogiSteeringShutdown(). The official
             // LogitechSteeringWheelEnginesWrapper.dll (SDK 8.75.30, the
-            // build we ship in vendor/LogitechSDK_unpacked) was compiled
+            // build we ship in vendor/LogitechSDK) was compiled
             // in DEBUG mode against MSVCR120D and is documented across the
             // Unity / Unreal sim-racing communities to crash inside its
             // own teardown when called at process exit. Logitech has not

@@ -36,7 +36,7 @@ First public release. Tested against Cyberpunk 2077 patch 2.31 (build 5294808).
 
 ### Wheel I/O
 
-- Wheel input and force feedback go through the official Logitech Steering Wheel SDK (vendored under `gwheel/vendor/LogitechSDK_unpacked/`). DirectInput enumeration, the ViGEmBus virtual-pad bridge, and the XInput-hook routing layer are all gone.
+- Wheel input and force feedback go through the official Logitech Steering Wheel SDK (vendored under `gwheel/vendor/LogitechSDK/`). DirectInput enumeration, the ViGEmBus virtual-pad bridge, and the XInput-hook routing layer are all gone.
 - Hardware capability detection: the plugin reads which features each wheel actually has (FFB motor, rev-strip LEDs, lower-cluster cluster) and seeds `red4ext/plugins/mod_settings/user.ini` at load time so the in-game Settings page only shows sections relevant to the connected hardware.
 
 ### Vehicle input injection
