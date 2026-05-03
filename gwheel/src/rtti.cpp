@@ -154,6 +154,15 @@ namespace gwheel::rtti
             if (aOut) *aOut = true;
         }
 
+        void SetResponseCurve(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
+        {
+            RED4ext::CString v;
+            RED4ext::GetParameter(aFrame, &v);
+            aFrame->code++;
+            config::SetResponseCurve(std::string_view(v.c_str()));
+            if (aOut) *aOut = true;
+        }
+
         template <void (*Fn)(int32_t)>
         void SetInt(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
         {
@@ -235,12 +244,52 @@ namespace gwheel::rtti
 
         // Vehicle telemetry pushed from redscript Blackboard listeners.
         // See gwheel_vehicle_signals.reds.
-        void SetEngineRpmNormalized(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
+        void SetEngineRpmRaw(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
         {
             float v = 0.f;
             RED4ext::GetParameter(aFrame, &v);
             aFrame->code++;
-            sources::SetEngineRpmNormalized(v);
+            sources::SetEngineRpmRaw(v);
+            if (aOut) *aOut = true;
+        }
+
+        // Per-mount engine profile: idle / redline plus the per-gear
+        // shift array. Pushed once from GWheelAttach after walking
+        // VehEngineData; the LED tick reads ShiftRpmForGear(currentGear)
+        // every frame to decide where the bar saturates.
+        void SetEngineProfile(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
+        {
+            float idleRpm = 0.f;
+            float redlineRpm = 0.f;
+            RED4ext::DynArray<float> shifts;
+            RED4ext::GetParameter(aFrame, &idleRpm);
+            RED4ext::GetParameter(aFrame, &redlineRpm);
+            RED4ext::GetParameter(aFrame, &shifts);
+            aFrame->code++;
+            const uint32_t n = shifts.Size();
+            sources::SetEngineProfile(idleRpm, redlineRpm,
+                                      n > 0 ? &shifts[0] : nullptr,
+                                      static_cast<int>(n));
+            log::InfoF("[gwheel:engine] profile pushed: idle=%.0f redline=%.0f gears=%u",
+                       idleRpm, redlineRpm, n);
+            for (uint32_t i = 0; i < n; ++i)
+                log::InfoF("[gwheel:engine]   gear[%u] shift=%.0f", i + 1, shifts[i]);
+            if (aOut) *aOut = true;
+        }
+
+        void ClearEngineProfile(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
+        {
+            aFrame->code++;
+            sources::ClearEngineProfile();
+            if (aOut) *aOut = true;
+        }
+
+        void SetCurrentGear(RED4ext::IScriptable*, RED4ext::CStackFrame* aFrame, bool* aOut, int64_t)
+        {
+            int32_t gear = 0;
+            RED4ext::GetParameter(aFrame, &gear);
+            aFrame->code++;
+            sources::SetCurrentGear(static_cast<int>(gear));
             if (aOut) *aOut = true;
         }
 
@@ -419,6 +468,12 @@ namespace gwheel::rtti
             RegisterGlobal(rtti, "GWheel_SetInputEnabled",
                            reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetInputEnabled),
                            "Bool", {{ "Bool", "v" }});
+            RegisterGlobal(rtti, "GWheel_SetSteerDeadzonePct",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetInt<&config::SetSteerDeadzonePct>),
+                           "Bool", {{ "Int32", "pct" }});
+            RegisterGlobal(rtti, "GWheel_SetResponseCurve",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetResponseCurve),
+                           "Bool", {{ "String", "v" }});
             RegisterGlobal(rtti, "GWheel_SetFfbEnabled",
                            reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetBool<&config::SetFfbEnabled>),
                            "Bool", {{ "Bool", "v" }});
@@ -474,9 +529,20 @@ namespace gwheel::rtti
                            reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&ClearPlayerVehicle),
                            "Bool", {});
 
-            RegisterGlobal(rtti, "GWheel_SetEngineRpmNormalized",
-                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetEngineRpmNormalized),
+            RegisterGlobal(rtti, "GWheel_SetEngineRpmRaw",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetEngineRpmRaw),
                            "Bool", {{ "Float", "v" }});
+            RegisterGlobal(rtti, "GWheel_SetEngineProfile",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetEngineProfile),
+                           "Bool", {{ "Float", "idleRpm" },
+                                    { "Float", "redlineRpm" },
+                                    { "array:Float", "perGearShiftRpms" }});
+            RegisterGlobal(rtti, "GWheel_ClearEngineProfile",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&ClearEngineProfile),
+                           "Bool", {});
+            RegisterGlobal(rtti, "GWheel_SetCurrentGear",
+                           reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetCurrentGear),
+                           "Bool", {{ "Int32", "gear" }});
             RegisterGlobal(rtti, "GWheel_SetRadioActive",
                            reinterpret_cast<RED4ext::ScriptingFunction_t<void*>>(&SetRadioActive),
                            "Bool", {{ "Bool", "v" }});

@@ -142,6 +142,23 @@ namespace gwheel::tweakdb_physics
             // first-mount which can race with ongoing reads.
             std::mutex resolvedMu;
             std::unordered_map<uint64_t, ResolvedRecords> resolvedByRecordID;
+
+            // Per-vehicle-POINTER cache, sitting in front of the recordID
+            // cache above. The recordID cache requires resolving the
+            // recordID first via ExecuteFunction(vehicle, GetRecord, ...) —
+            // a Handle<>-returning getter call that leaks/over-decrements
+            // record handles per call (see project-bike-mount-crash memory
+            // entry, 2026-05-02). Three remounts of the same bike triggered
+            // three GetRecord calls; the third dereferenced a freed handle
+            // at Cyberpunk2077.exe+0x72512B reading 0xFFFFFFFFFFFFFFFF.
+            //
+            // This cache short-circuits BEFORE the GetRecord call: same
+            // vehicle pointer mounted N times = exactly one GetRecord call
+            // total, regardless of N. Bounded by the count of unique
+            // vehicles the player mounts in one game session (~handful),
+            // not by the count of mount events (unbounded across play).
+            std::mutex resolvedByPtrMu;
+            std::unordered_map<void*, ResolvedRecords> resolvedByVehiclePtr;
         };
 
         State& S() { static State s; return s; }
@@ -466,6 +483,16 @@ namespace gwheel::tweakdb_physics
         auto& st = S();
         if (!st.ready.load(std::memory_order_acquire)) return result;
 
+        // Per-vehicle-pointer cache hit = no GetRecord call at all. Same
+        // bike mounted N times → N-1 calls skipped. See note on
+        // resolvedByVehiclePtr above for the crash this prevents.
+        {
+            std::lock_guard<std::mutex> lk(st.resolvedByPtrMu);
+            auto it = st.resolvedByVehiclePtr.find(vehicle);
+            if (it != st.resolvedByVehiclePtr.end())
+                return it->second;
+        }
+
         EnsureChainGettersResolved();
 
         // Step 1: vehicle -> recordID (TweakDBID).
@@ -497,11 +524,21 @@ namespace gwheel::tweakdb_physics
         result.vehicleRecordID = recordIDHash;
 
         // Cache lookup. Hot path on subsequent ticks for the same vehicle.
+        // (Distinct from the per-pointer cache up top — same recordID can
+        // back two distinct vehicle pointers, e.g. quest-spawned vs garage
+        // instances of the same model. Each pointer gets its own pointer-
+        // cache entry but shares the recordID-cache walk.)
         {
             std::lock_guard<std::mutex> lk(st.resolvedMu);
             auto it = st.resolvedByRecordID.find(recordIDHash);
             if (it != st.resolvedByRecordID.end())
+            {
+                // Promote into the pointer cache so the next mount of this
+                // exact pointer skips GetRecord.
+                std::lock_guard<std::mutex> lk2(st.resolvedByPtrMu);
+                st.resolvedByVehiclePtr[vehicle] = it->second;
                 return it->second;
+            }
         }
 
         // Step 2: vehicleRecord -> DriveModelData handle. Try subtype FKs in
@@ -632,6 +669,13 @@ namespace gwheel::tweakdb_physics
         {
             std::lock_guard<std::mutex> lk(st.resolvedMu);
             st.resolvedByRecordID[recordIDHash] = result;
+        }
+        // Also stash by raw vehicle pointer so subsequent mounts of the
+        // SAME vehicle skip the GetRecord call entirely (the only
+        // remaining Handle<>-returning getter call in this resolver).
+        {
+            std::lock_guard<std::mutex> lk(st.resolvedByPtrMu);
+            st.resolvedByVehiclePtr[vehicle] = result;
         }
         return result;
     }

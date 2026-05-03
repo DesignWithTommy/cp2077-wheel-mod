@@ -514,19 +514,32 @@ namespace gwheel::wheel
             const int idx = st.index.load(std::memory_order_acquire);
             if (idx >= 0)
             {
-                // Always stop any forces we might have kicked off.
+                // Always stop any forces we might have kicked off so the
+                // wheel doesn't keep pulling after the game window closes.
                 LogiStopSpringForce(idx);
                 LogiStopDamperForce(idx);
                 LogiStopConstantForce(idx);
                 LogiStopSurfaceEffect(idx);
                 LogiStopCarAirborne(idx);
+                // Bar dark on the way out so the LEDs don't latch at
+                // their last value through the shutdown window.
+                LogiPlayLeds(idx, 0.f, 100.f, 200.f);
 
                 // Operating range is G HUB's to manage; we don't touch it
                 // on shutdown. G HUB will keep enforcing whatever its
                 // profile says.
             }
-            LogiSteeringShutdown();
-            log::Info("[gwheel] LogiSteeringShutdown ok");
+
+            // Deliberately NOT calling LogiSteeringShutdown(). The official
+            // LogitechSteeringWheelEnginesWrapper.dll (SDK 8.75.30, the
+            // build we ship in vendor/LogitechSDK_unpacked) was compiled
+            // in DEBUG mode against MSVCR120D and is documented across the
+            // Unity / Unreal sim-racing communities to crash inside its
+            // own teardown when called at process exit. Logitech has not
+            // shipped a release-mode build. We've already stopped every
+            // force above; SDK state is reclaimed by the OS when the game
+            // process exits a fraction of a second later.
+            log::Info("[gwheel] LogiSteeringShutdown skipped (known SDK debug-DLL crash on teardown; OS reclaims state on process exit)");
         }
         st.index.store(-1, std::memory_order_release);
         log::Info("[gwheel] wheel::Shutdown complete");
@@ -775,6 +788,32 @@ namespace gwheel::wheel
         const int idx = st.index.load(std::memory_order_acquire);
         if (idx < 0) return;
         WriteLeds(idx, level);
+    }
+
+    void PlayLedsRaw(float currentRpm, float firstLedRpm, float shiftRpm)
+    {
+        auto& st = S();
+        if (!st.ready.load()) return;
+        const int idx = st.index.load(std::memory_order_acquire);
+        if (idx < 0) return;
+        // Degenerate profile (shiftRpm <= firstLedRpm or both zero) means
+        // the redscript push hasn't landed yet; fall through to the
+        // dark-bar branch of WriteLeds rather than feeding LogiPlayLeds
+        // a zero-width window which the firmware interprets unpredictably.
+        if (!(shiftRpm > firstLedRpm) || shiftRpm <= 0.f)
+        {
+            WriteLeds(idx, 0.f);
+            return;
+        }
+        if (currentRpm < firstLedRpm)
+        {
+            // Below the first-LED threshold the SDK leaves the bar dark.
+            // Route through WriteLeds' explicit-dark form to dodge the
+            // G923 idle-indicator quirk.
+            WriteLeds(idx, 0.f);
+            return;
+        }
+        LogiPlayLeds(idx, currentRpm, firstLedRpm, shiftRpm);
     }
 
     void ClearLeds()

@@ -1,6 +1,8 @@
 #include "axis_resolver.h"
+#include "config.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -48,6 +50,45 @@ namespace gwheel::axis_resolver
             if (std::memcmp(tok, prefix, plen) != 0) return false;
             out.assign(tok + plen, len - plen);
             return true;
+        }
+
+        // Apply center deadzone + response curve to a signed steering input
+        // in [-1, +1]. Pedals (UnsignedMax) skip this — they already clamp
+        // 0..1 and don't suffer from center bias.
+        //
+        // Deadzone: |v| < dz returns 0; otherwise rescale linearly so that
+        // values just outside the deadzone start at 0 and full deflection
+        // still reaches +/-1. Without rescaling, the wheel would lose 2-15%
+        // of its range to the deadzone (a quiet sensitivity nerf).
+        //
+        // Response curve: power-law on |v|, sign preserved. Subdued > 1
+        // softens center; Sharp < 1 sharpens center. Default is linear.
+        float ShapeSignedSteer(float v, int32_t deadzonePct, const std::string& curve)
+        {
+            const float dz = std::clamp(deadzonePct, 0, 99) * 0.01f;
+            const float a  = std::fabs(v);
+            if (a <= dz) return 0.f;
+
+            // Rescale so a == dz -> 0, a == 1 -> 1.
+            const float rescaled = (a - dz) / (1.f - dz);
+            const float clamped  = std::clamp(rescaled, 0.f, 1.f);
+
+            float shaped = clamped;
+            if (curve == "subdued")
+            {
+                // |v|^1.7 — convex; halves response near center, recovers
+                // toward full at the rim.
+                shaped = std::pow(clamped, 1.7f);
+            }
+            else if (curve == "sharp")
+            {
+                // |v|^0.6 — concave; small movements off-center already
+                // produce ~half deflection.
+                shaped = std::pow(clamped, 0.6f);
+            }
+            // "default" / unknown: linear (already in `shaped`).
+
+            return std::copysign(shaped, v);
         }
     }
 
@@ -127,6 +168,14 @@ namespace gwheel::axis_resolver
                 if (u > result) result = u;
             }
         });
+
+        if (mode == Combine::SignedFirst && haveSigned)
+        {
+            // Steer-only filtering. Pedals skip this — they're 0..1 and
+            // don't suffer from a center offset.
+            const auto cfg = config::Current();
+            result = ShapeSignedSteer(result, cfg.input.steerDeadzonePct, cfg.input.responseCurve);
+        }
 
         return result;
     }

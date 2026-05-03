@@ -38,6 +38,15 @@
 // Mod Settings UI; the in-vehicle banner (gwheel_mount.reds, future phase)
 // nags them when SteerAxis/ThrottleAxis/BrakeAxis are unbound.
 
+// Per Mod Settings memory rule: enum values persist by DROPDOWN POSITION,
+// not by declared integer value. Never reorder, never leave gaps. New
+// curves go at the end.
+enum GWheelResponseCurve {
+  Default = 0,
+  Subdued = 1,
+  Sharp   = 2,
+}
+
 public class GWheelSettings extends IScriptable {
 
   // ---- Hidden capability flags (auto-set in OnGameAttached) --------------
@@ -61,6 +70,26 @@ public class GWheelSettings extends IScriptable {
   @runtimeProperty("ModSettings.category.order", "100")
   @runtimeProperty("ModSettings.displayName", "Enable wheel input")
   let inputEnabled: Bool = true;
+
+  @runtimeProperty("ModSettings.mod", "G-series Wheel")
+  @runtimeProperty("ModSettings.category", "Wheel input")
+  @runtimeProperty("ModSettings.category.order", "100")
+  @runtimeProperty("ModSettings.displayName", "Steering deadzone (%)")
+  @runtimeProperty("ModSettings.description", "Filters small wheel-center jitter so the car doesn't drift when your hands are off the wheel. The 0 percent setting passes raw axis values through. 2-3 percent is typical for Logitech wheels; 5-10 percent if the wheel reports a large idle offset.")
+  @runtimeProperty("ModSettings.min", "0")
+  @runtimeProperty("ModSettings.max", "15")
+  @runtimeProperty("ModSettings.step", "1")
+  let steerDeadzonePct: Int32 = 2;
+
+  @runtimeProperty("ModSettings.mod", "G-series Wheel")
+  @runtimeProperty("ModSettings.category", "Wheel input")
+  @runtimeProperty("ModSettings.category.order", "100")
+  @runtimeProperty("ModSettings.displayName", "Response curve")
+  @runtimeProperty("ModSettings.description", "Reshapes how wheel rotation maps to steering. Default is linear. Subdued softens response near center for relaxed cruising. Sharp pulls more response near center for tight handling at the cost of twitchiness.")
+  @runtimeProperty("ModSettings.displayValues.Default", "Default")
+  @runtimeProperty("ModSettings.displayValues.Subdued", "Subdued")
+  @runtimeProperty("ModSettings.displayValues.Sharp",   "Sharp")
+  let responseCurve: GWheelResponseCurve = GWheelResponseCurve.Default;
 
   // ---- Force feedback -----------------------------------------------------
 
@@ -114,18 +143,21 @@ public class GWheelSettings extends IScriptable {
   @runtimeProperty("ModSettings.dependency", "hasFfbHardware")
   let stationaryThresholdMps: Float = 0.5;
 
+  // Conceptually an input-direction toggle (turning the wheel right makes
+  // the car turn left); FFB pipeline follows automatically as a side
+  // effect of how the math is wired. Lives in Wheel input rather than
+  // Force feedback so the section reflects the user's mental model.
   @runtimeProperty("ModSettings.mod", "G-series Wheel")
-  @runtimeProperty("ModSettings.category", "Force feedback")
-  @runtimeProperty("ModSettings.category.order", "200")
-  @runtimeProperty("ModSettings.displayName", "Invert FFB direction")
-  @runtimeProperty("ModSettings.description", "Flip the sign of all restoring forces. Enable if your wheel pushes the wrong way under cornering.")
-  @runtimeProperty("ModSettings.dependency", "hasFfbHardware")
+  @runtimeProperty("ModSettings.category", "Wheel input")
+  @runtimeProperty("ModSettings.category.order", "100")
+  @runtimeProperty("ModSettings.displayName", "Invert steering")
+  @runtimeProperty("ModSettings.description", "Reverse the wheel's steering direction so turning the wheel right makes the car turn left. Useful for inverted-wheel mount setups. Restoring forces follow automatically so the wheel still self-centers correctly in the mirrored world.")
   let ffbInvertDirection: Bool = false;
 
   @runtimeProperty("ModSettings.mod", "G-series Wheel")
   @runtimeProperty("ModSettings.category", "Force feedback")
   @runtimeProperty("ModSettings.category.order", "200")
-  @runtimeProperty("ModSettings.displayName", "Reverse hardware FFB direction")
+  @runtimeProperty("ModSettings.displayName", "Invert FFB direction")
   @runtimeProperty("ModSettings.description", "If your wheel snaps to full lock instead of centering when you start driving, enable this. Common on Logitech G HUB wheels (verified on G923) where the SDK's constant-force direction is reported opposite to documentation.")
   @runtimeProperty("ModSettings.dependency", "hasFfbHardware")
   let ffbOutputSignFlip: Bool = false;
@@ -580,6 +612,15 @@ public class GWheelSettings extends IScriptable {
   @runtimeProperty("ModSettings.description", "Logs to red4ext/logs/gwheel-*.log.")
   let ffbDebugLogging: Bool = false;
 
+  // Map the enum value to the lowercase string token the C++ config
+  // layer expects ("default" / "subdued" / "sharp"). Static so OnModSettingsChange
+  // doesn't pay the per-call instance cost.
+  public static func ResponseCurveToken(c: GWheelResponseCurve) -> String {
+    if Equals(c, GWheelResponseCurve.Subdued) { return "subdued"; }
+    if Equals(c, GWheelResponseCurve.Sharp)   { return "sharp"; }
+    return "default";
+  }
+
   // ---- Listener callbacks (invoked by Mod Settings, NOT cb funcs) --------
 
   public func OnModSettingsChange() -> Void {
@@ -588,6 +629,8 @@ public class GWheelSettings extends IScriptable {
 
   public func Push() -> Void {
     GWheel_SetInputEnabled(this.inputEnabled);
+    GWheel_SetSteerDeadzonePct(this.steerDeadzonePct);
+    GWheel_SetResponseCurve(GWheelSettings.ResponseCurveToken(this.responseCurve));
 
     GWheel_SetFfbEnabled(this.ffbEnabled);
     GWheel_SetFfbDebugLogging(this.ffbDebugLogging);
@@ -684,17 +727,7 @@ protected cb func OnGameAttached() -> Bool {
     ModSettings.RegisterListenerToModifications(this.m_gwheelSettings);
     this.m_gwheelSettings.Push();
   }
-  // Register the wheel-input provider so the Mod Settings InputBinding
-  // listening UI can reach the gwheel capture natives via
-  // ModSettingsInputProviderRegistry.Get(). The registry is process-wide
-  // (backed by ModSettings.GetInstance(), a native singleton); a single
-  // provider slot, subsequent registrations overwrite.
   ModSettingsInputProviderRegistry.Set(new GWheelInputProvider());
-  // Stash a fallback GameInstance for the listening UI's poll scheduler.
-  // ModSettingsMainGameController.OnInitialize already stashes one when
-  // a player puppet exists; this covers the case where user opened the
-  // Mod Settings menu from the main menu (no player) but had previously
-  // loaded a save (this OnGameAttached fired and recorded a valid GI).
   ModSettings.GetInstance().inputProviderGameInstance = this.GetGame();
   return result;
 }

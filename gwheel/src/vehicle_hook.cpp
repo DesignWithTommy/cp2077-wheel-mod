@@ -931,22 +931,42 @@ namespace gwheel::vehicle_hook
         if (prev != p)
         {
             log::InfoF("[gwheel:hook] player vehicle changed: %p -> %p", prev, p);
-            // Reset the per-vehicle physics-logging latch so the next
-            // vehicle's turnRate / wheelbase / etc. get dumped on first
-            // tick. Also clear the per-car yaw reference and angular-
-            // velocity history so stale values from the previous ride
-            // don't bleed across the transition.
-            g_lastPhysicsLoggedVehicle.store(nullptr, std::memory_order_release);
+            // Always reset live-state history — these are per-tick values that
+            // would bleed stale across rides if held.
             g_perCarYawRef.store(0.f, std::memory_order_release);
             g_prevAngVelX.store(0.f, std::memory_order_release);
             g_prevAngVelY.store(0.f, std::memory_order_release);
             g_prevLinVelZ.store(0.f, std::memory_order_release);
             for (int i = 0; i < 4; ++i)
                 g_lastWheelMat[i].store(0, std::memory_order_release);
+
+            // Per-car authored snapshot (g_lastPhysicsLoggedVehicle,
+            // g_perCarSelf, g_perCarSnapshot) is only invalidated when a
+            // DIFFERENT non-null vehicle mounts than what's currently cached.
+            // Comparing against the cached vehicle (not the just-cleared
+            // g_playerVehicle from the prior dismount) means same-vehicle
+            // remount keeps the cached snapshot.
+            //
+            // Why: ResolvePerVehicle inside the snapshot walk calls
+            // ExecuteFunction on TweakDB Handle<>-returning getters. Those
+            // getters leak / over-decrement record handles per call (see
+            // memory: TweakDB Handle<>-returning getters not safe per-tick).
+            // Re-walking the SAME bike on each remount accumulated handle
+            // damage; the third walk dereferenced a freed record at
+            // Cyberpunk2077.exe+0x72512B reading 0xFFFFFFFFFFFFFFFF (Rancho
+            // Coronado bike repro, 2026-05-02). mod_settings/inputBinding
+            // only affected when the crash manifested via heap layout — the
+            // root fault is the unbounded TweakDB walks here.
+            if (p != nullptr)
             {
-                std::lock_guard<std::mutex> lk(g_perCarMu);
-                g_perCarSelf     = nullptr;
-                g_perCarSnapshot = tweakdb_physics::PerCarPhysics{};
+                void* cached = g_lastPhysicsLoggedVehicle.load(std::memory_order_acquire);
+                if (cached != p)
+                {
+                    g_lastPhysicsLoggedVehicle.store(nullptr, std::memory_order_release);
+                    std::lock_guard<std::mutex> lk(g_perCarMu);
+                    g_perCarSelf     = nullptr;
+                    g_perCarSnapshot = tweakdb_physics::PerCarPhysics{};
+                }
             }
         }
         // In-vehicle context flag tracks presence/absence of a mounted

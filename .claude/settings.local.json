@@ -9,7 +9,14 @@
       "Bash(python3 /tmp/probe_diff.py)",
       "Bash(Get-ChildItem -Path \"Z:\\\\repos\\\\gaming\\\\mods\\\\cp2077-wheel-mod\" -Recurse -Force)",
       "Bash(Select-Object -First 50)",
-      "Bash(Format-Table FullName)"
+      "Bash(Format-Table FullName)",
+      "Read(//c/Program Files \\(x86\\)/Steam/steamapps/common/Cyberpunk 2077/r6/**)",
+      "Read(//c/Program Files \\(x86\\)/Steam/steamapps/common/Cyberpunk 2077/**)",
+      "PowerShell(.\\\\build.ps1 2>&1 | Select-Object -Last 60)",
+      "PowerShell(.\\\\deploy.ps1 -Game \"S:\\\\SteamLibrary\\\\steamapps\\\\common\\\\Cyberpunk 2077\" 2>&1 | Select-Object -Last 40)",
+      "PowerShell(.\\\\build.ps1 2>&1 | Select-Object -Last 20)",
+      "PowerShell(.\\\\deploy.ps1 -Game \"S:\\\\SteamLibrary\\\\steamapps\\\\common\\\\Cyberpunk 2077\" 2>&1 | Select-Object -Last 10i)",
+      "WebFetch(domain:wiki.redmodding.org)"
     ]
   }
 }

@@ -116,7 +116,15 @@ namespace gwheel
     {
         log::Info("[gwheel] unloading");
 
-        // Shut LED + audio down before the pump / SDK so the controller
+        // Detach the vehicle-input detour FIRST so the game's
+        // UpdateVehicleCameraInput stops re-entering us while the rest
+        // of the plugin is mid-teardown. The detour reads sources::Frame
+        // and writes axes into the vehicle — leaving it live until the
+        // end means a game-thread call could land on half-torn-down
+        // state when the player quits while in a vehicle.
+        vehicle_hook::Shutdown();
+
+        // Then shut LED + audio + pump. LED first so the controller
         // isn't still calling LogiPlayLeds as we tear the SDK down.
         led::Shutdown();
         audio_monitor::Shutdown();
@@ -124,8 +132,18 @@ namespace gwheel
         g_pumpRunning.store(false, std::memory_order_release);
         if (g_pumpThread.joinable()) g_pumpThread.join();
 
+        // Defensive zeroing of telemetry sources. Threads that read
+        // these are already joined; this just ensures the state is
+        // clean if the DLL is later reloaded (RED4ext supports hot-
+        // reload of plugins) without leaning on static destruction
+        // ordering.
+        sources::SetInVehicle(false);
+        sources::SetEngineRpmRaw(0.f);
+        sources::SetCurrentGear(0);
+        sources::ClearEngineProfile();
+        sources::SetRadioActive(false);
+
         kbd_hook::Uninstall();
-        vehicle_hook::Shutdown();
         wheel::Shutdown();
 
         auto& ctx = Ctx();

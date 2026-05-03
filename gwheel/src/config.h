@@ -10,7 +10,24 @@ namespace gwheel::config
     struct Input
     {
         bool        enabled = true;
-        std::string responseCurve = "default"; // default | subdued | sharp
+
+        // Center deadzone applied only to signed-axis bindings (steer).
+        // Wheel hardware reports a small non-zero center offset at rest
+        // (1-3% on most Logitech models), which without filtering causes
+        // a constant tiny steering input -> the car drifts even with hands
+        // off the wheel. Stored as a percent (0..15) so the mod settings
+        // slider can show 0%-15%; converted to a 0..0.15 fraction inside
+        // axis_resolver. Zero disables the deadzone entirely.
+        int32_t     steerDeadzonePct = 2;
+
+        // Response curve applied to signed-axis bindings (steer) AFTER
+        // the deadzone:
+        //   "default"  : linear pass-through.
+        //   "subdued"  : convex (|v|^1.7), softer near center, full at lock.
+        //               Helps drift-prone or low-speed cruising.
+        //   "sharp"    : concave (|v|^0.6), sharper near center, full at lock.
+        //               Helps tight handling at the cost of twitchiness.
+        std::string responseCurve = "default";
     };
 
     struct Ffb
@@ -159,6 +176,7 @@ namespace gwheel::config
     // Per-field setters. Each one swaps the snapshot atomically and writes
     // the updated config back to disk.
     void SetInputEnabled(bool v);
+    void SetSteerDeadzonePct(int32_t v);
     void SetResponseCurve(std::string_view v);
 
     void SetFfbEnabled(bool v);

@@ -18,6 +18,14 @@ public static native func GWheel_DetectedModelName() -> String;
 
 public static native func GWheel_SetInputEnabled(v: Bool) -> Bool;
 
+// Steer-only input shaping. Deadzone is a percent in [0..15] applied to
+// the centered wheel value before any curve; the wheel range is rescaled
+// so a small deadzone doesn't lose you any sensitivity at full lock.
+// ResponseCurve is "default" (linear), "subdued" (convex, soft center),
+// or "sharp" (concave, sharp center). Pedals are unaffected.
+public static native func GWheel_SetSteerDeadzonePct(pct: Int32) -> Bool;
+public static native func GWheel_SetResponseCurve(v: String) -> Bool;
+
 public static native func GWheel_SetFfbEnabled(v: Bool) -> Bool;
 public static native func GWheel_SetFfbDebugLogging(v: Bool) -> Bool;
 public static native func GWheel_SetFfbTorquePct(pct: Int32) -> Bool;
@@ -66,10 +74,24 @@ public static native func GWheel_SetPlayerVehicle(v: ref<VehicleObject>) -> Bool
 public static native func GWheel_ClearPlayerVehicle() -> Bool;
 
 // Vehicle telemetry pushed from Blackboard listeners (gwheel_vehicle_signals.reds).
-// Normalized engine RPM in [0..1] = RPMValue / VehEngineData.MaxRPM().
-// Radio state mirrors VehicleDef.VehRadioState.
-public static native func GWheel_SetEngineRpmNormalized(v: Float) -> Bool;
+// Engine RPM is sent in raw vehicle units (typically 800..7100 for cars);
+// the LED rev strip combines it with a per-gear shift point pushed via
+// GWheel_SetEngineProfile so the bar saturates at the AI's actual upshift
+// instead of at global redline. Radio state mirrors VehicleDef.VehRadioState.
+public static native func GWheel_SetEngineRpmRaw(v: Float) -> Bool;
 public static native func GWheel_SetRadioActive(v: Bool) -> Bool;
+
+// Per-mount engine profile, pushed once from GWheelAttach after walking
+// VehicleEngineData_Record. idleRpm = MinRPM(), redlineRpm = MaxRPM(),
+// perGearShiftRpms[i] = gears[i].MaxEngineRPM() in forward-gear order
+// (index 0 = first gear). The LED tick reads ShiftRpmForGear(currentGear)
+// every frame; out-of-range gears (neutral / reverse) fall back to redline.
+public static native func GWheel_SetEngineProfile(idleRpm: Float, redlineRpm: Float, perGearShiftRpms: array<Float>) -> Bool;
+public static native func GWheel_ClearEngineProfile() -> Bool;
+
+// Current transmission gear from VehicleDef.GearValue. 0=neutral,
+// positive=forward gear N, negative=reverse.
+public static native func GWheel_SetCurrentGear(gear: Int32) -> Bool;
 
 // Collision / bump feedback. lateralKick is the world-space hit direction
 // dotted with the vehicle's right vector, signed in [-1..+1] (negative =

@@ -87,6 +87,15 @@ namespace gwheel::wheel
     // or no wheel is connected.
     void PlayLeds(float level);
 
+    // Pass-through to LogiPlayLeds in raw RPM units. firstLedRpm is the
+    // RPM at which the first green LED lights; shiftRpm is where the bar
+    // saturates (last red blink). currentRpm is the live engine RPM.
+    // The SDK accepts any unit as long as all three values share it.
+    // Used by the LED rev-strip path to drive a per-gear shift indicator
+    // (currentRpm reaches shiftRpm at the AI's actual upshift, not at
+    // global redline).
+    void PlayLedsRaw(float currentRpm, float firstLedRpm, float shiftRpm);
+
     // Force the LED bar dark. Called on LED-feature disable and on
     // plugin shutdown so the bar doesn't latch at its last value.
     void ClearLeds();

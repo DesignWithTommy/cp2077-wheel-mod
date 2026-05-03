@@ -337,6 +337,19 @@ namespace gwheel::input_bindings
             DWORD       capturePovBase     = 0xFFFFFFFF;
             float       captureAxesBase[wheel::Axis_kCount] = {0};
             std::string captured;
+
+            // Axis-capture leadership tracking. Picking the first axis to
+            // cross threshold loses to noise: a foot resting on the throttle
+            // pedal can swing lY by 0.5 in a single frame and beat any
+            // intentional wheel rotation. Instead we track the cumulative
+            // max |delta| per axis across the entire capture, name the axis
+            // with the highest cumulative max as the "leader," and only
+            // commit once that leader has held its lead for a settling
+            // window (so a brief blip doesn't lock in the wrong choice).
+            float       captureAxisMax[wheel::Axis_kCount] = {0};
+            int         captureLeader        = -1;  // -1 = no leader yet
+            uint64_t    captureTickCount     = 0;
+            uint64_t    captureLeaderSince   = 0;   // tick when leader took over
         };
 
         State& S() { static State s; return s; }
@@ -642,6 +655,34 @@ namespace gwheel::input_bindings
         st.bindings.clear();
     }
 
+    // Synthesize a VK_F24 keypress to wake the listening UI when capture
+    // completes. The redscript-side OnKeyBindingEvent handler recognizes
+    // n"IK_F24" while listening, drains the captured value via the input
+    // provider, commits it, and exits listening.
+    //
+    // Why this and not a DelayCallback poll loop: CP2077's in-game pause
+    // menu freezes the DelaySystem dispatcher entirely, even with
+    // isAffectedByTimeDilation=false. Keyboard events, by contrast, do
+    // dispatch during pause (Esc / arrow keys / Enter all work). So a
+    // synthetic keypress is the most reliable signal channel from C++
+    // (running on its own pump thread) into redscript.
+    //
+    // Tagged with kbd_hook::kExtraInfoTag so the LL keyboard hook lets
+    // it pass through (the hook would otherwise filter our own SendInput
+    // events the same way it filters G HUB's).
+    void FireCaptureWakeup()
+    {
+        INPUT ev[2] = {};
+        ev[0].type           = INPUT_KEYBOARD;
+        ev[0].ki.wVk         = VK_F24;
+        ev[0].ki.dwExtraInfo = kbd_hook::kExtraInfoTag;
+        ev[1].type           = INPUT_KEYBOARD;
+        ev[1].ki.wVk         = VK_F24;
+        ev[1].ki.dwFlags     = KEYEVENTF_KEYUP;
+        ev[1].ki.dwExtraInfo = kbd_hook::kExtraInfoTag;
+        SendInput(2, ev, sizeof(INPUT));
+    }
+
     void OnTick(const sources::Frame& frame)
     {
         auto& st = S();
@@ -649,11 +690,18 @@ namespace gwheel::input_bindings
         const uint32_t buttons = frame.digital.buttons;
         const DWORD    pov     = static_cast<DWORD>(frame.digital.pov);
 
+        // Tracks whether THIS tick filled the captured slot (false→true
+        // transition) and whether capture is still armed. Both are set
+        // inside the lock so we can release the mutex before SendInput.
+        bool captureWokeThisTick = false;
+        bool captureStillArmed   = false;
+
         // Capture-mode handling runs ahead of the action dispatcher and
         // runs even when input is globally disabled, so the bind UI can
         // capture inputs while config.input.enabled is false.
         {
             std::lock_guard lk(st.mtx);
+            const bool wasCapturedBefore = !st.captured.empty();
             if (st.captureKind != CaptureKind::None && st.captured.empty())
             {
                 if (st.captureKind == CaptureKind::Button)
@@ -683,21 +731,56 @@ namespace gwheel::input_bindings
                 }
                 else if (st.captureKind == CaptureKind::Axis)
                 {
-                    constexpr float kAxisDeviationThreshold = 0.25f;
+                    // Tunable: how far an axis must move from its baseline
+                    // to even be considered. 0.25 is comfortable for both
+                    // a half-pressed pedal and a ~50° turn on a 180° wheel.
+                    constexpr float    kAxisDeviationThreshold = 0.25f;
+                    // Tunable: how many pump ticks (~250 Hz) the leader must
+                    // hold its lead before we commit. ~50 ticks = 200 ms.
+                    // Long enough to outlast a transient blip, short enough
+                    // not to feel laggy.
+                    constexpr uint64_t kLeaderStabilityTicks   = 50;
+
                     const wheel::Snapshot snap = wheel::CurrentSnapshot();
+                    ++st.captureTickCount;
+
+                    // Update cumulative max |delta| per axis. Find the
+                    // current leader (axis with the largest cumulative max
+                    // that is also above threshold).
+                    int   leaderIdx = -1;
+                    float leaderMax = 0.f;
                     for (int i = 0; i < wheel::Axis_kCount; ++i)
                     {
-                        const float delta = snap.axes[i] - st.captureAxesBase[i];
-                        if (std::fabs(delta) >= kAxisDeviationThreshold)
+                        const float d = std::fabs(snap.axes[i] - st.captureAxesBase[i]);
+                        if (d > st.captureAxisMax[i]) st.captureAxisMax[i] = d;
+                        if (st.captureAxisMax[i] >= kAxisDeviationThreshold &&
+                            st.captureAxisMax[i] > leaderMax)
                         {
-                            char buf[64];
-                            std::snprintf(buf, sizeof(buf), "wheel-axis:%s",
-                                          wheel::AxisName(static_cast<wheel::Axis>(i)));
-                            st.captured = buf;
-                            log::InfoF("[gwheel:capture] axis caught: %s (delta=%.2f)",
-                                       buf, delta);
-                            break;
+                            leaderIdx = i;
+                            leaderMax = st.captureAxisMax[i];
                         }
+                    }
+
+                    // Reset the stability counter every time a new axis
+                    // takes the lead. The user is still moving things; wait
+                    // for the dust to settle.
+                    if (leaderIdx != st.captureLeader)
+                    {
+                        st.captureLeader      = leaderIdx;
+                        st.captureLeaderSince = st.captureTickCount;
+                    }
+
+                    if (st.captureLeader >= 0 &&
+                        st.captureTickCount - st.captureLeaderSince >= kLeaderStabilityTicks)
+                    {
+                        char buf[64];
+                        std::snprintf(buf, sizeof(buf), "wheel-axis:%s",
+                                      wheel::AxisName(static_cast<wheel::Axis>(st.captureLeader)));
+                        st.captured = buf;
+                        log::InfoF("[gwheel:capture] axis caught: %s (maxDelta=%.2f, stable for %llu ticks)",
+                                   buf, leaderMax,
+                                   static_cast<unsigned long long>(
+                                       st.captureTickCount - st.captureLeaderSince));
                     }
                 }
 
@@ -706,8 +789,10 @@ namespace gwheel::input_bindings
                     log::InfoF("[gwheel:capture] button caught: %s", st.captured.c_str());
                 }
             }
+            captureWokeThisTick = !wasCapturedBefore && !st.captured.empty();
+            captureStillArmed   = (st.captureKind != CaptureKind::None);
 
-            if (st.captureKind != CaptureKind::None)
+            if (captureStillArmed)
             {
                 // Update edge-prev so the dispatcher resumes cleanly when
                 // capture ends (stale prev would fire spurious edges on
@@ -715,8 +800,21 @@ namespace gwheel::input_bindings
                 st.prevButtons = buttons;
                 st.prevPov     = pov;
                 st.havePrev    = true;
-                return;
             }
+        }
+
+        // Mutex released. Fire the wake-up keypress outside the lock so we
+        // never hold the mutex across SendInput (which can block briefly).
+        if (captureWokeThisTick)
+        {
+            FireCaptureWakeup();
+        }
+
+        // If we were inside capture mode, the dispatcher must not run
+        // (suppress wheel-button → game-action dispatch during binding).
+        if (captureStillArmed)
+        {
+            return;
         }
 
         if (!config::Current().input.enabled) return;
@@ -783,7 +881,13 @@ namespace gwheel::input_bindings
         st.captureButtonsBase = snap.buttons;
         st.capturePovBase     = snap.pov;
         for (int i = 0; i < wheel::Axis_kCount; ++i)
+        {
             st.captureAxesBase[i] = snap.axes[i];
+            st.captureAxisMax[i]  = 0.f;
+        }
+        st.captureLeader      = -1;
+        st.captureTickCount   = 0;
+        st.captureLeaderSince = 0;
         log::InfoF("[gwheel:capture] BeginCapture(%s)",
                    st.captureKind == CaptureKind::Axis ? "axis" : "button");
     }

@@ -72,3 +72,37 @@ $RECYCLE.BIN/
 # Backups
 *.bak
 *.backup
+
+# Local-only investigation artifacts. These accumulated during the
+# bike-mount crash hunt; the crash is resolved (Stage A per-vehicle
+# TweakDB cache landed in tweakdb_physics.cpp + gwheel_vehicle_signals.reds)
+# but the tools stay on disk locally in case a similar issue resurfaces.
+# None of this needs to ship in the public repo.
+
+# Decompiled CP2077 redscript bundles, dumps, throwaway notes
+.scratch/
+
+# Bisect harness — progressively-enabled gwheel_settings variants used to
+# narrow which @runtimeProperty annotation triggered the crash
+gwheel_reds/bisect/
+
+# RTTI offset / struct dump walker (Python). Used during physics-cache
+# investigation to find field offsets in vehiclePhysics structs.
+tools/dump_walker/
+
+# Bisect-specific deploy helpers (the canonical deploy is deploy.ps1):
+#   deploy-dll-only         — C++ only, no .reds. Splits crash bisect into
+#                             redscript-half vs C++-half.
+#   deploy-dll-and-reds     — DLL + chosen subset of .reds for narrowing.
+#   deploy-modsettings-only — mod_settings.dll only; requires gwheel
+#                             disabled. For vanilla-vs-fork A/B testing.
+#   enable / disable        — toggle gwheel install for A/B comparison.
+#   swap-modsettings-upstream — replace forked mod_settings with upstream
+#                             to isolate whether the fork triggered the
+#                             crash.
+deploy-dll-only.ps1
+deploy-dll-and-reds.ps1
+deploy-modsettings-only.ps1
+enable.ps1
+disable.ps1
+swap-modsettings-upstream.ps1

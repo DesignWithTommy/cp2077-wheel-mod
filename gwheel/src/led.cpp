@@ -25,6 +25,13 @@ namespace gwheel::led
         // doesn't strobe segments.
         constexpr float kRpmEnvelopeAlpha = 0.35f;
 
+        // First-LED threshold lands 60% of the way from idle to the
+        // current gear's shift point. Below this the bar is fully dark;
+        // above this it ramps green→amber→red→blink as RPM climbs to
+        // the shift point. 0.6 chosen so cruise sits in the dark range
+        // and only an actual approach to upshift lights the strip.
+        constexpr float kFirstLedFraction = 0.6f;
+
         void Tick(bool& ledsDarkened, float& rpmState)
         {
             // The startup handshake owns the bar while it runs its own
@@ -67,32 +74,35 @@ namespace gwheel::led
             // Blackboard listener) — NOT by audio-amplitude heuristics.
             // When the radio is on AND the user opted into the music-
             // visualizer mode, the bar tracks the WASAPI-loopback audio
-            // level. When off, the bar shows real engine RPM.
+            // level. When off, the bar shows real engine RPM scaled by
+            // the current gear's shift point.
             const bool visualize = cfg.led.visualizerWhileMusic
                                    && sources::RadioActive();
 
-            float level = 0.f;
             if (visualize)
             {
                 // Audio monitor's CurrentLevel() is the dynamic-range-
-                // normalised WASAPI signal. Even with the radio on this
-                // still includes game SFX in the same mix, so the bar
-                // reacts to both music AND engine/combat — acceptable
-                // fallback until a proper music-bus tap is done.
-                level = audio_monitor::CurrentLevel();
-            }
-            else
-            {
-                // Real engine RPM, already normalised to [0..1] by the
-                // redscript listener dividing by VehEngineData.MaxRPM().
-                // Smooth so the bar moves like a needle, not like a jump
-                // counter.
-                const float target = sources::EngineRpmNormalized();
-                rpmState += kRpmEnvelopeAlpha * (target - rpmState);
-                level = rpmState;
+                // normalised WASAPI signal in [0..1]. Send through the
+                // legacy normalized path; the music branch has no notion
+                // of RPM units.
+                rpmState = 0.f;
+                wheel::PlayLeds(std::clamp(audio_monitor::CurrentLevel(), 0.f, 1.f));
+                return;
             }
 
-            wheel::PlayLeds(std::clamp(level, 0.f, 1.f));
+            // Per-gear rev-strip path. Look up the active gear's shift
+            // point on every tick: the redscript Int listener writes
+            // currentGear on every transmission change, so this read is
+            // always coherent with the engine state.
+            const float target = sources::EngineRpmRaw();
+            rpmState += kRpmEnvelopeAlpha * (target - rpmState);
+
+            const int   gear     = sources::CurrentGear();
+            const float idleRpm  = sources::IdleRpm();
+            const float shiftRpm = sources::ShiftRpmForGear(gear);
+
+            const float firstLedRpm = idleRpm + kFirstLedFraction * (shiftRpm - idleRpm);
+            wheel::PlayLedsRaw(rpmState, firstLedRpm, shiftRpm);
         }
 
         void Loop()

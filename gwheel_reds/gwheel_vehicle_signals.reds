@@ -1,17 +1,23 @@
-// Push real vehicle telemetry (engine RPM, radio on/off) from the game's
-// own Blackboard into the gwheel plugin so the LED rev strip can show
-// the actual simulated RPM instead of a throttle-derived bluff, and so
-// the music-visualizer mode fires from the game's authoritative radio
-// state rather than audio-amplitude heuristics.
+// Push real vehicle telemetry (engine RPM, radio on/off, transmission
+// gear) from the game's own Blackboard into the gwheel plugin so the
+// LED rev strip shows actual simulated RPM scaled by the current gear's
+// shift point (the bar saturates at the AI's upshift, not at global
+// redline), and so the music-visualizer mode fires from the game's
+// authoritative radio state rather than audio-amplitude heuristics.
 //
 // Blackboard fields used (VehicleDef, scripts/core/blackboard/blackboardDefinitions.script):
 //   RPMValue       : Float   — current engine RPM, driven by the audio/
 //                              gameplay system (same value car_hud.script
 //                              feeds its RPM gauge widget).
+//   GearValue      : Int32   — current transmission gear; 0=neutral,
+//                              positive=forward gear, negative=reverse.
 //   VehRadioState  : Bool    — true while the in-car radio receiver is on.
 //
-// RPM is normalised against VehicleRecord.VehEngineData().MaxRPM() —
-// per-vehicle, read once per mount.
+// Engine profile (idle / redline / per-gear shift RPMs) is walked once
+// from VehicleRecord.VehEngineData() on attach and pushed to native
+// via GWheel_SetEngineProfile so the LED tick can look up the active
+// gear's shift point without re-reading TweakDB record handles each
+// frame.
 //
 // Lifecycles that must all converge to an attached listener set:
 //   - Fresh mount (VehicleFinishedMountingEvent) — happens on entering
@@ -21,13 +27,40 @@
 //   - Unmount (UnmountingEvent) — tears down listeners and clears state
 
 @addField(VehicleComponent)
-public let m_gwheelRpmMax: Float;
-
-@addField(VehicleComponent)
 public let m_gwheelRpmBbId: ref<CallbackHandle>;
 
 @addField(VehicleComponent)
+public let m_gwheelGearBbId: ref<CallbackHandle>;
+
+@addField(VehicleComponent)
 public let m_gwheelRadioBbId: ref<CallbackHandle>;
+
+// Per-VehicleComponent engine-profile cache. The TweakDB walk that
+// populates these fields uses Handle<>-returning getters (Vehicle_Record,
+// VehicleEngineData_Record, VehicleGear_Record) which leak record
+// handles per call. Three remounts of the same bike previously triggered
+// three walks; the third dereferenced a freed record at
+// Cyberpunk2077.exe+0x72512B reading 0xFFFFFFFFFFFFFFFF (Rancho Coronado
+// repro, 2026-05-02). Caching the walk result on the VehicleComponent
+// (which persists for the vehicle's lifetime) bounds the leak to ~one
+// walk per unique vehicle ever mounted, instead of one per mount event.
+//
+// The cached values are still pushed to the C++ global engine-profile
+// state on EVERY mount (cheap atomic stores, no leaks) so switching
+// vehicles correctly updates the LED bar's redline reference. The C++
+// side has an analogous per-vehicle-pointer cache in
+// tweakdb_physics::ResolvePerVehicle covering its own GetRecord call.
+@addField(VehicleComponent)
+public let m_gwheelEngineProfileCached: Bool;
+
+@addField(VehicleComponent)
+public let m_gwheelIdleRpm: Float;
+
+@addField(VehicleComponent)
+public let m_gwheelRedlineRpm: Float;
+
+@addField(VehicleComponent)
+public let m_gwheelPerGearShifts: array<Float>;
 
 // Resolve max-RPM, register Blackboard listeners, seed initial state.
 // Idempotent: if the listeners are already attached (m_gwheelRpmBbId
@@ -44,22 +77,38 @@ public func GWheelAttach() -> Void {
     return;
   }
 
-  // Resolve this vehicle's max RPM once. VehEngineData is a static
-  // record attached to every VehicleObject; falling back to 8000 is
-  // defensive for tanks / oddball vehicles where the record lookup
-  // fails (an arbitrary "reasonable redline" that prevents div-by-0).
-  let record: wref<Vehicle_Record> = vehicle.GetRecord();
-  let maxRpm: Float = 8000.0;
-  if IsDefined(record) {
-    let engineData: wref<VehicleEngineData_Record> = record.VehEngineData();
-    if IsDefined(engineData) {
-      let recordedMax: Float = engineData.MaxRPM();
-      if recordedMax > 0.0 {
-        maxRpm = recordedMax;
+  // Resolve this vehicle's engine profile and cache it on the
+  // VehicleComponent. Walk runs once per VehicleComponent (TweakDB
+  // Handle<>-returning getters leak per call); push to the C++ global
+  // state runs on every mount (cheap atomic stores, no leaks) so the LED
+  // bar tracks the active vehicle's redline correctly across vehicle
+  // switches. Tanks / oddball vehicles where the record lookup fails
+  // get an empty profile and the LED tick falls back to "bar always
+  // dark" (the FFB pipeline already excludes tanks via
+  // ChassisKind::Unknown).
+  if !this.m_gwheelEngineProfileCached {
+    let record: wref<Vehicle_Record> = vehicle.GetRecord();
+    if IsDefined(record) {
+      let engineData: wref<VehicleEngineData_Record> = record.VehEngineData();
+      if IsDefined(engineData) {
+        this.m_gwheelIdleRpm = engineData.MinRPM();
+        this.m_gwheelRedlineRpm = engineData.MaxRPM();
+        let gearCount: Int32 = engineData.GetGearsCount();
+        let gearIdx: Int32 = 0;
+        while gearIdx < gearCount {
+          let gear: wref<VehicleGear_Record> = engineData.GetGearsItem(gearIdx);
+          if IsDefined(gear) {
+            ArrayPush(this.m_gwheelPerGearShifts, gear.MaxEngineRPM());
+          } else {
+            ArrayPush(this.m_gwheelPerGearShifts, this.m_gwheelRedlineRpm);
+          }
+          gearIdx += 1;
+        }
       }
     }
+    this.m_gwheelEngineProfileCached = true;
   }
-  this.m_gwheelRpmMax = maxRpm;
+  GWheel_SetEngineProfile(this.m_gwheelIdleRpm, this.m_gwheelRedlineRpm, this.m_gwheelPerGearShifts);
 
   let bb: ref<IBlackboard> = vehicle.GetBlackboard();
   if !IsDefined(bb) {
@@ -79,7 +128,9 @@ public func GWheelAttach() -> Void {
   // source already knows it. Subsequent state changes still flow
   // through the listener registered just below.
   let initialRpm: Float = bb.GetFloat(GetAllBlackboardDefs().Vehicle.RPMValue);
-  GWheel_SetEngineRpmNormalized(initialRpm / this.m_gwheelRpmMax);
+  GWheel_SetEngineRpmRaw(initialRpm);
+  let initialGear: Int32 = bb.GetInt(GetAllBlackboardDefs().Vehicle.GearValue);
+  GWheel_SetCurrentGear(initialGear);
   let radioOn: Bool = vehicle.IsRadioReceiverActive()
                       || bb.GetBool(GetAllBlackboardDefs().Vehicle.VehRadioState);
   GWheel_SetRadioActive(radioOn);
@@ -87,6 +138,8 @@ public func GWheelAttach() -> Void {
   // Subscribe to change events.
   this.m_gwheelRpmBbId = bb.RegisterListenerFloat(
     GetAllBlackboardDefs().Vehicle.RPMValue, this, n"OnGwheelRpmChanged");
+  this.m_gwheelGearBbId = bb.RegisterListenerInt(
+    GetAllBlackboardDefs().Vehicle.GearValue, this, n"OnGwheelGearChanged");
   this.m_gwheelRadioBbId = bb.RegisterListenerBool(
     GetAllBlackboardDefs().Vehicle.VehRadioState, this, n"OnGwheelRadioChanged");
 
@@ -156,16 +209,21 @@ public func GWheelDetach() -> Void {
       if IsDefined(this.m_gwheelRpmBbId) {
         bb.UnregisterListenerFloat(GetAllBlackboardDefs().Vehicle.RPMValue, this.m_gwheelRpmBbId);
       }
+      if IsDefined(this.m_gwheelGearBbId) {
+        bb.UnregisterListenerInt(GetAllBlackboardDefs().Vehicle.GearValue, this.m_gwheelGearBbId);
+      }
       if IsDefined(this.m_gwheelRadioBbId) {
         bb.UnregisterListenerBool(GetAllBlackboardDefs().Vehicle.VehRadioState, this.m_gwheelRadioBbId);
       }
     }
   }
   this.m_gwheelRpmBbId = null;
+  this.m_gwheelGearBbId = null;
   this.m_gwheelRadioBbId = null;
-  this.m_gwheelRpmMax = 0.0;
 
-  GWheel_SetEngineRpmNormalized(0.0);
+  GWheel_SetEngineRpmRaw(0.0);
+  GWheel_SetCurrentGear(0);
+  GWheel_ClearEngineProfile();
   GWheel_SetRadioActive(false);
 }
 
@@ -197,9 +255,13 @@ protected cb func OnUnmountingEvent(evt: ref<UnmountingEvent>) -> Bool {
 // fails to compile with UNEXPECTED_THIS.
 @addMethod(VehicleComponent)
 protected cb func OnGwheelRpmChanged(value: Float) -> Bool {
-  if this.m_gwheelRpmMax > 0.0 {
-    GWheel_SetEngineRpmNormalized(value / this.m_gwheelRpmMax);
-  }
+  GWheel_SetEngineRpmRaw(value);
+  return true;
+}
+
+@addMethod(VehicleComponent)
+protected cb func OnGwheelGearChanged(value: Int32) -> Bool {
+  GWheel_SetCurrentGear(value);
   return true;
 }
 

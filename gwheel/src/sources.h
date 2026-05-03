@@ -60,10 +60,38 @@ namespace gwheel::sources
     // music visualizer (radio-driven). Reads are atomic and safe from
     // any thread.
 
-    // Normalized engine RPM in [0..1] = VehicleDef.RPMValue / MaxRPM.
-    // 0 when not in a vehicle.
-    void  SetEngineRpmNormalized(float v);
-    float EngineRpmNormalized();
+    // Raw engine RPM in the vehicle's authored unit (typically 800..7100
+    // for cars). Pushed straight from VehicleDef.RPMValue with no
+    // normalization. The LED controller feeds this directly to
+    // LogiPlayLeds together with the per-gear shift point so the bar
+    // saturates at the AI's actual upshift moment instead of at global
+    // redline. 0 when not in a vehicle.
+    void  SetEngineRpmRaw(float v);
+    float EngineRpmRaw();
+
+    // Per-mount engine profile pushed once on attach. idleRpm comes from
+    // VehEngineData.MinRPM(), redlineRpm from MaxRPM(), and the per-gear
+    // shift array is each gear's MaxEngineRPM() in forward-gear order
+    // (index 0 = first gear). When currentGear lands outside the valid
+    // forward-gear range (neutral / reverse / unrecognized), the LED
+    // tick falls back to redlineRpm as the shift point.
+    static constexpr int kMaxGears = 16;
+    void  SetEngineProfile(float idleRpm, float redlineRpm,
+                           const float* perGearShiftRpms, int gearCount);
+    void  ClearEngineProfile();
+    float IdleRpm();
+    float RedlineRpm();
+
+    // Per-gear shift point lookup. Returns redlineRpm for any gear index
+    // outside [1..gearCount] (neutral, reverse, sentinel). Read on every
+    // LED tick so it's atomic / lock-free.
+    float ShiftRpmForGear(int gear);
+
+    // Current transmission gear. 0=neutral, positive=forward gear N,
+    // negative=reverse. Pushed from VehicleDef.GearValue Blackboard
+    // listener.
+    void SetCurrentGear(int gear);
+    int  CurrentGear();
 
     // Vehicle radio receiver state — true when the in-car radio is on
     // AND a station is playing. false when radio off or not in a
