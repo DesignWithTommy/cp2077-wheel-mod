@@ -2,6 +2,7 @@
 build/
 out/
 dist/
+staging/
 bin/
 obj/
 x64/

@@ -18,8 +18,21 @@
   <requiredInstallFiles>
     <file source="build\gwheel.dll"
           destination="red4ext\plugins\gwheel\gwheel.dll"/>
+
+    <!-- Patched mod_settings: DLL + redscript bundle + Wolvenkit-packed
+         archive (.inkwidget layout edits) + ArchiveXL .xl manifest.
+         Vortex will flag all four as conflicts against upstream Mod
+         Settings. The "File conflicts" install step below pre-warns
+         the user to let this mod win all of them. -->
     <file source="mod_settings\mod_settings.dll"
           destination="red4ext\plugins\mod_settings\mod_settings.dll"/>
+    <file source="mod_settings\packed.reds"
+          destination="red4ext\plugins\mod_settings\packed.reds"/>
+    <file source="mod_settings\ModSettings.archive"
+          destination="red4ext\plugins\mod_settings\ModSettings.archive"/>
+    <file source="mod_settings\ModSettings.archive.xl"
+          destination="red4ext\plugins\mod_settings\ModSettings.archive.xl"/>
+
     <file source="gwheel_reds\gwheel_natives.reds"
           destination="r6\scripts\gwheel\gwheel_natives.reds"/>
     <file source="gwheel_reds\gwheel_settings.reds"
@@ -32,9 +45,44 @@
           destination="r6\scripts\gwheel\gwheel_surface.reds"/>
     <file source="gwheel_reds\gwheel_vehicle_signals.reds"
           destination="r6\scripts\gwheel\gwheel_vehicle_signals.reds"/>
+    <file source="gwheel_reds\gwheel_input_provider.reds"
+          destination="r6\scripts\gwheel\gwheel_input_provider.reds"/>
   </requiredInstallFiles>
 
   <installSteps order="Explicit">
+
+    <!-- Pre-warn the user about the Mod Settings file-conflict prompt.
+         Vortex shows the prompt at deploy time (after this installer
+         finishes), so we can't silence it here, but we can explain it
+         in advance. The plugin is type="Required" with no files, so
+         it acts as a read-only info page. -->
+    <installStep name="File conflicts (read this)">
+      <optionalFileGroups order="Explicit">
+        <group name="About the Mod Settings file conflicts" type="SelectAll">
+          <plugins order="Explicit">
+
+            <plugin name="Choose THIS mod to win all Mod Settings conflicts">
+              <description>This mod ships a small fork of Mod Settings (the same one already installed via Mod Settings on Nexus) with one extra UI primitive that lets you bind wheel buttons. The fork is API-compatible with upstream Mod Settings, so other mods that use Mod Settings keep working.
+
+After you click Install, Vortex will show a "File conflicts" prompt for FOUR files belonging to Mod Settings:
+
+  - mod_settings.dll
+  - packed.reds
+  - ModSettings.archive
+  - ModSettings.archive.xl
+
+For each one, choose "Logitech G-series Wheel Mod" to win the conflict (load AFTER Mod Settings). Don't pick Mod Settings, or the new bind-your-wheel UI won't appear in the in-game Settings page.
+
+If you ever uninstall this mod, reinstall Mod Settings from its Nexus page to restore the upstream files.</description>
+              <typeDescriptor>
+                <type name="Required"/>
+              </typeDescriptor>
+            </plugin>
+
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
 
     <installStep name="Startup handshake">
       <optionalFileGroups order="Explicit">

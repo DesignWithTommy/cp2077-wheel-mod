@@ -2,13 +2,13 @@
 
 **v2.31.0** for Cyberpunk 2077 game patch 2.31.
 
-Drive Cyberpunk 2077 with a Logitech G-series steering wheel. Your wheel handles steering, throttle, brake, and clutch. Force feedback fires from in-game physics (centering as you turn, cornering load, surface texture, collision jolts, slip when you lose grip). Rev-strip LEDs follow real engine RPM. When the in-car radio is on, the rev strip becomes a music visualizer.
+Drive Cyberpunk 2077 with a Logitech G-series steering wheel. Your wheel handles steering, throttle, and brake. Force feedback fires from in-game physics (centering as you turn, cornering load, surface texture, collision jolts, slip when you lose grip). Rev-strip LEDs follow real engine RPM. When the in-car radio is on, the rev strip becomes a music visualizer.
 
 There is no virtual gamepad to install, no XInput shim, no third-party driver. The wheel talks to the game via the official Logitech Steering Wheel SDK (the same one driving sims use).
 
 ## Supported wheels
 
-The mod was designed to work with any wheel that is compatible with Logitech G Hub.
+The mod was designed to work with any wheel that is compatible with Logitech G HUB.
 
 I tested with:
 
@@ -42,9 +42,26 @@ Non-Logitech wheels (Thrustmaster, Fanatec, Moza) are not supported.
 ## Install
 
 1. Click the **Vortex** download button on this page (the green button in the Files tab).
-1. Vortex will ask about a file conflict on `mod_settings.dll`. Choose this mod to win the conflict (load after Mod Settings). The included file is a small patch on top of upstream Mod Settings.
+1. The installer's first page explains the file conflict. Read it, then click Next.
+1. Pick whether you want the startup pulse animation, then finish the installer.
+1. Vortex will then prompt you about a **file conflict on four files** belonging to Mod Settings:
+   - `mod_settings.dll`
+   - `packed.reds`
+   - `ModSettings.archive`
+   - `ModSettings.archive.xl`
 
-(Manual Download is also available if you don't use Vortex, but Mod Manager Download is the supported path. If you go manual, you handle the file conflict on `mod_settings.dll` yourself by overwriting upstream Mod Settings' DLL with the one from this zip.)
+   For each one, choose **this mod** to win the conflict (load *after* Mod Settings). The included files are a small fork of Mod Settings that adds one extra UI primitive — the press-to-bind slot you'll use to map your wheel buttons. The fork is API-compatible with upstream, so other mods that use Mod Settings keep working.
+
+(If you go manual instead of Vortex, the same four files need to overwrite upstream Mod Settings' versions in `red4ext\plugins\mod_settings\`.)
+
+## Bind your wheel
+
+Defaults are intentionally empty. On first launch, open **Main Menu → Mod Settings → G-series Wheel** and bind:
+
+1. **Steering & pedals.** Steering, Throttle, Brake. Click the slot, then turn the wheel or press the pedal you want to assign.
+1. Anything else you want — Horn, Handbrake, Headlights, paddles for next/previous weapon, etc. Each slot accepts two bindings, so you can assign two wheel buttons to the same action (e.g. left paddle AND D-pad-Up to "Next weapon").
+
+Categories: Steering & pedals, Driving, Camera, Combat, Weapons, Radio, Gameplay, Menus, Menu navigation.
 
 ## G HUB
 
@@ -54,14 +71,27 @@ If you have wheel buttons configured in your G HUB Cyberpunk profile that overla
 
 I recommend starting with an operating range of 180 to start, since the rotation will match the animation you see in 1st person view inside of a car. I tend to like it a bit wider to help mitigate fishtailing.
 
+## Settings
+
+All settings live in **Main Menu → Mod Settings → G-series Wheel**. Highlights:
+
+- **Wheel input.** Master enable, steering deadzone (filters small wheel-center jitter — 2-3% is typical), response curve (Default / Subdued / Sharp), invert steering.
+- **Force feedback.** Master enable, FFB strength, cornering feedback, active torque, stationary threshold, **invert FFB direction** (G923 quirk, see Troubleshooting), **speed-sensitive stiffness** (sportscar assist on/off).
+- **Rev-strip LEDs.** Master enable, music visualizer while music is playing.
+- **Steering & pedals / Driving / Camera / Combat / Weapons / Radio / Gameplay / Menus / Menu navigation.** All bindable.
+- **Startup.** Pon pon shi greeting on/off.
+- **Debug.** Logs to `red4ext/logs/gwheel-*.log`.
+
+Hardware-capability sections auto-hide on wheels without the relevant components.
+
 ## Troubleshooting
 
-- **Wheel detected but the car doesn't move.** Make sure RED4ext is installed and current.
-- **Settings page is missing.** Mod Settings or ArchiveXL aren't installed correctly. The wheel will still work on defaults.
-- **Three orphan toggles named `hasFfbHardware` / `hasRevLeds` / `hasRightCluster` show up in settings.** Vortex installed stock Mod Settings on top of the patched build that ships with this mod. Re-deploy in Vortex and let this mod win the file conflict.
-- **Doubled keypresses on D-pad or A/B/X/Y.** G HUB and this mod are both binding the same keys. Reset the wheel-button entries in your G HUB Cyberpunk profile back to their default bindings.
-- **Wheel rolls *away* from center instead of recovering, or fights you back into the turn under load.** Open Mod Settings → G-series Wheel → Force feedback and enable **Hardware sign flip (G923 quirk)**. This is a known Logitech-wide issue (G29/G920/G923/G27/G25/Driving Force/Momo) where some unit/firmware/G HUB combinations interpret the SDK's constant-force direction opposite to what's documented. Forza, iRacing, and most other sim titles expose the same toggle.
-- **Wheel feels too stiff or too floppy at speed.** **Speed-sensitive stiffness** in Force feedback settings controls this. On (default): wheel firms up at speed (sportscar-style steering assist). Off: pure tire-force feedback only, like BeamNG — wheel goes light at rest and feels more raw at speed.
+- **Wheel detected but the car doesn't move.** Make sure RED4ext is installed and current. Then check that you've actually bound Steering, Throttle, and Brake under Mod Settings → G-series Wheel → Steering & pedals — defaults are empty.
+- **Settings page is missing.** Mod Settings or ArchiveXL aren't installed correctly. The wheel will still work on defaults, but you can't bind anything.
+- **The bind slots are missing the press-to-bind capture, or the page looks like vanilla Mod Settings.** Vortex installed stock Mod Settings on top of the fork that ships with this mod. Re-deploy in Vortex and let this mod win the file conflicts on `mod_settings.dll`, `packed.reds`, `ModSettings.archive`, and `ModSettings.archive.xl`.
+- **Doubled keypresses on a wheel button.** G HUB and this mod are both binding the same key. Either clear the entry from your G HUB Cyberpunk profile, or unbind that action here.
+- **Wheel rolls *away* from center instead of recovering, or fights you back into the turn under load.** Open Mod Settings → G-series Wheel → Force feedback and enable **Invert FFB direction**. This is a known Logitech-wide issue (G29/G920/G923/G27/G25/Driving Force/Momo) where some unit/firmware/G HUB combinations interpret the SDK's constant-force direction opposite to what's documented. Forza, iRacing, and most other sim titles expose the same toggle.
+- **Wheel feels too stiff or too floppy at speed.** **Speed-sensitive stiffness** in Force feedback settings controls this. On (default): wheel firms up at speed (sportscar-style steering assist). Off: pure tire-force feedback only, like BeamNG. The wheel goes light at rest and feels more raw at speed.
 
 ## Credits
 

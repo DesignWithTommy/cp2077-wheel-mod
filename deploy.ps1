@@ -359,6 +359,28 @@ foreach ($r in $redsFiles) {
   Copy-Item -Force $r (Join-Path $stagingDir (Split-Path $r -Leaf | ForEach-Object { "gwheel_reds\$_" }))
 }
 
+# Patched mod_settings redscript bundle + Wolvenkit-packed archive. These
+# carry our fork's redscript-side changes (InputBinding primitive,
+# ModSettingsInputProvider, pair-widget UI) and the .inkwidget layout
+# edits. Without them the new bind-from-Mod-Settings UI never compiles
+# and the pair widget never appears in-game.
+$patchedModSettingsReds = Join-Path $repoRoot "vendor\mod_settings\build\staging\packed.reds"
+if (-not (Test-Path $patchedModSettingsReds)) {
+  Fail "Missing patched mod_settings packed.reds at $patchedModSettingsReds. Run build.ps1 (it packs the bundle as part of the mod_settings build step)."
+}
+Copy-Item -Force $patchedModSettingsReds (Join-Path $stagingDir "mod_settings\packed.reds")
+
+$packedArchiveSrc   = Join-Path $repoRoot "vendor\mod_settings\src\wolvenkit\packed\archive\pc\mod\ModSettings.archive"
+$packedArchiveXlSrc = Join-Path $repoRoot "vendor\mod_settings\src\archiveXL\ModSettings.archive.xl"
+if (-not (Test-Path $packedArchiveSrc)) {
+  Fail "Missing Wolvenkit-packed ModSettings.archive at $packedArchiveSrc. In Wolvenkit: open ModSettings.cpmodproj, then click Pack Project on the toolbar before re-running deploy."
+}
+Copy-Item -Force $packedArchiveSrc (Join-Path $stagingDir "mod_settings\ModSettings.archive")
+if (-not (Test-Path $packedArchiveXlSrc)) {
+  Fail "Missing ModSettings.archive.xl at $packedArchiveXlSrc."
+}
+Copy-Item -Force $packedArchiveXlSrc (Join-Path $stagingDir "mod_settings\ModSettings.archive.xl")
+
 # Include README + CHANGELOG as top-level files so Vortex shows them.
 if (Test-Path "README.md")    { Copy-Item -Force "README.md"    $stagingDir }
 if (Test-Path "CHANGELOG.md") { Copy-Item -Force "CHANGELOG.md" $stagingDir }
