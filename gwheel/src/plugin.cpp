@@ -8,7 +8,6 @@
 #include "kbd_hook.h"
 #include "config.h"
 #include "rtti.h"
-#include "rtti_dump.h"
 #include "audio_monitor.h"
 #include "led.h"
 #include "mod_settings_seed.h"

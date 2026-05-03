@@ -5,7 +5,6 @@
 #include "vehicle_hook.h"
 #include "plugin.h"
 #include "logging.h"
-#include "rtti_dump.h"
 #include "rtti_offsets.h"
 #include "tweakdb_physics.h"
 #include "sources.h"

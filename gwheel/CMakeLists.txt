@@ -10,7 +10,6 @@ set(GWHEEL_SOURCES
   src/kbd_hook.cpp
   src/config.cpp
   src/rtti.cpp
-  src/rtti_dump.cpp
   src/rtti_offsets.cpp
   src/tweakdb_physics.cpp
   src/logging.cpp
@@ -32,7 +31,6 @@ set(GWHEEL_HEADERS
   src/kbd_hook.h
   src/config.h
   src/rtti.h
-  src/rtti_dump.h
   src/rtti_offsets.h
   src/tweakdb_physics.h
   src/audio_monitor.h

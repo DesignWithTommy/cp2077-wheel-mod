@@ -101,9 +101,4 @@ tools/dump_walker/
 #   swap-modsettings-upstream — replace forked mod_settings with upstream
 #                             to isolate whether the fork triggered the
 #                             crash.
-deploy-dll-only.ps1
-deploy-dll-and-reds.ps1
-deploy-modsettings-only.ps1
-enable.ps1
-disable.ps1
-swap-modsettings-upstream.ps1
+dev-scripts/
