@@ -1,0 +1,2 @@
+add_executable(trueforce_probe trueforce_probe.cpp)
+set_target_properties(trueforce_probe PROPERTIES OUTPUT_NAME "trueforce_probe")

@@ -23,6 +23,154 @@ namespace gwheel::wheel_backend
 {
     namespace
     {
+        // ====================================================================
+        // SEH probe helpers
+        //
+        // The W-suffixed exports (logiTrueForceSupportedByDirectInputW and
+        // logiWheelOpenByDirectInputW) crash hard on first call when handed
+        // an IDirectInputDevice8W*. Without official Logitech headers, the
+        // actual argument shape is unknown. SEH-wrap each variant attempt
+        // so one wrong guess doesn't kill the game; iterate through plausible
+        // argument types until one survives.
+        //
+        // Variants tried for SupportedByDirectInputW:
+        //   A. IDirectInputDevice8W*           (the obvious COM-pointer reading)
+        //   B. const GUID* (guidInstance)      (DInput's per-device GUID)
+        //   C. const GUID* (guidProduct)       (VID/PID-derived product GUID)
+        //   D. const wchar_t* (productName)    (W-suffix often = wide string)
+        //
+        // The function pointer typedef declares parameter A; for B/C/D we
+        // reinterpret_cast the function pointer to a different signature and
+        // call. This is safe at the call site (function pointers are just
+        // addresses), modulo whatever the SDK actually expects.
+        // ====================================================================
+
+        struct SehResult
+        {
+            bool  survived       = false;
+            bool  result         = false;
+            DWORD exceptionCode  = 0;
+            int   intResult      = -1;
+        };
+
+        // Pass IDirectInputDevice8W* (literal interface pointer).
+        SehResult Seh_SupportedByDInput_AsDevice(
+            void* fn, IDirectInputDevice8W* dev)
+        {
+            using PFN = bool (__cdecl*)(IDirectInputDevice8W*);
+            SehResult r{};
+            __try { r.result = reinterpret_cast<PFN>(fn)(dev); r.survived = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { r.exceptionCode = GetExceptionCode(); }
+            return r;
+        }
+
+        // Pass a pointer to a GUID.
+        SehResult Seh_SupportedByDInput_AsGuidPtr(void* fn, const GUID* g)
+        {
+            using PFN = bool (__cdecl*)(const GUID*);
+            SehResult r{};
+            __try { r.result = reinterpret_cast<PFN>(fn)(g); r.survived = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { r.exceptionCode = GetExceptionCode(); }
+            return r;
+        }
+
+        // Pass a wide-char string (e.g. friendly name or device path).
+        SehResult Seh_SupportedByDInput_AsWideStr(void* fn, const wchar_t* s)
+        {
+            using PFN = bool (__cdecl*)(const wchar_t*);
+            SehResult r{};
+            __try { r.result = reinterpret_cast<PFN>(fn)(s); r.survived = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { r.exceptionCode = GetExceptionCode(); }
+            return r;
+        }
+
+        // SEH-wrapped open call for each candidate signature shape. Returns
+        // the int wheel handle on survive (>=0 success, <0 SDK-reported error)
+        // or -1 with survived=false on AV.
+        SehResult Seh_OpenByDInput_AsDevice(void* fn, IDirectInputDevice8W* dev)
+        {
+            using PFN = int (__cdecl*)(IDirectInputDevice8W*);
+            SehResult r{};
+            r.intResult = -1;
+            __try { r.intResult = reinterpret_cast<PFN>(fn)(dev); r.survived = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { r.exceptionCode = GetExceptionCode(); }
+            return r;
+        }
+
+        SehResult Seh_OpenByDInput_AsGuidPtr(void* fn, const GUID* g)
+        {
+            using PFN = int (__cdecl*)(const GUID*);
+            SehResult r{};
+            r.intResult = -1;
+            __try { r.intResult = reinterpret_cast<PFN>(fn)(g); r.survived = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { r.exceptionCode = GetExceptionCode(); }
+            return r;
+        }
+
+        SehResult Seh_OpenByDInput_AsWideStr(void* fn, const wchar_t* s)
+        {
+            using PFN = int (__cdecl*)(const wchar_t*);
+            SehResult r{};
+            r.intResult = -1;
+            __try { r.intResult = reinterpret_cast<PFN>(fn)(s); r.survived = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { r.exceptionCode = GetExceptionCode(); }
+            return r;
+        }
+
+        // SEH-wrapped no-arg → bool. Used to probe logiTrueForceAvailable().
+        SehResult Seh_BoolNoArg(void* fn)
+        {
+            using PFN = bool (__cdecl*)();
+            SehResult r{};
+            if (!fn) return r;
+            __try { r.result = reinterpret_cast<PFN>(fn)(); r.survived = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { r.exceptionCode = GetExceptionCode(); }
+            return r;
+        }
+
+        // Generic SEH-wrapped int-arg → bool call (e.g. logiTrueForceSupported(int)).
+        SehResult Seh_BoolByInt(void* fn, int idx)
+        {
+            using PFN = bool (__cdecl*)(int);
+            SehResult r{};
+            __try { r.result = reinterpret_cast<PFN>(fn)(idx); r.survived = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { r.exceptionCode = GetExceptionCode(); }
+            return r;
+        }
+
+        // SEH-wrapped (int wheelHandle, double value) → bool. Used to probe
+        // SetTorqueKF / SetDamping / SetGainKF / SetGainTF.
+        SehResult Seh_BoolByIntDouble(void* fn, int idx, double value)
+        {
+            using PFN = bool (__cdecl*)(int, double);
+            SehResult r{};
+            __try { r.result = reinterpret_cast<PFN>(fn)(idx, value); r.survived = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { r.exceptionCode = GetExceptionCode(); }
+            return r;
+        }
+
+        // SEH-wrapped (int wheelHandle, int* outValue) → bool. Some Get*
+        // functions follow this pattern.
+        SehResult Seh_BoolByIntIntPtr(void* fn, int idx, int* outValue)
+        {
+            using PFN = bool (__cdecl*)(int, int*);
+            SehResult r{};
+            __try { r.result = reinterpret_cast<PFN>(fn)(idx, outValue); r.survived = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { r.exceptionCode = GetExceptionCode(); }
+            return r;
+        }
+
+        // SEH-wrapped (int wheelHandle, double* outValue) → bool. Used to probe
+        // GetMaxPeakTorqueKF / GetDamping / GetTorqueKF.
+        SehResult Seh_BoolByIntDoublePtr(void* fn, int idx, double* outValue)
+        {
+            using PFN = bool (__cdecl*)(int, double*);
+            SehResult r{};
+            __try { r.result = reinterpret_cast<PFN>(fn)(idx, outValue); r.survived = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { r.exceptionCode = GetExceptionCode(); }
+            return r;
+        }
+
         // ---- TrueForceBackend ---------------------------------------------
         //
         // Drives the TrueForce SDK directly. Owns its own IDirectInputDevice8W
@@ -344,11 +492,13 @@ namespace gwheel::wheel_backend
 
             struct EnumCtx
             {
-                IDirectInput8W* di;
+                IDirectInput8W*       di;
                 IDirectInputDevice8W* device;
-                uint16_t pid;
-                uint16_t vid;
-                wchar_t  productName[256];
+                uint16_t              pid;
+                uint16_t              vid;
+                GUID                  guidInstance;
+                GUID                  guidProduct;
+                wchar_t               productName[256];
             };
 
             static BOOL CALLBACK EnumDevicesCallback(LPCDIDEVICEINSTANCEW inst, LPVOID ud)
@@ -363,9 +513,11 @@ namespace gwheel::wheel_backend
                 if (FAILED(ctx->di->CreateDevice(inst->guidInstance, &dev, nullptr)) || !dev)
                     return DIENUM_CONTINUE;
 
-                ctx->device = dev;
-                ctx->vid    = vid;
-                ctx->pid    = pid;
+                ctx->device       = dev;
+                ctx->vid          = vid;
+                ctx->pid          = pid;
+                ctx->guidInstance = inst->guidInstance;
+                ctx->guidProduct  = inst->guidProduct;
                 std::wcsncpy(ctx->productName, inst->tszProductName,
                              sizeof(ctx->productName) / sizeof(wchar_t) - 1);
                 return DIENUM_STOP;
@@ -373,6 +525,9 @@ namespace gwheel::wheel_backend
 
             bool TryOpenDevice()
             {
+                if (permanentFailure_.load(std::memory_order_acquire))
+                    return false;
+
                 HWND hwnd = logi_common::FindOwnGameWindow();
                 const uint32_t n = openAttempts_.fetch_add(1, std::memory_order_relaxed) + 1;
                 const bool verbose = (n == 1) || (n % 1250 == 0);
@@ -411,74 +566,170 @@ namespace gwheel::wheel_backend
                     return false;
                 }
                 log::InfoF("[gwheel] TFBE.open[3] device created pid=0x%04X", ctx.pid);
-
-                // Probe TrueForce support BEFORE doing anything cooperative-
-                // level intrusive. If the wheel isn't TrueForce-capable we
-                // fail fast without touching DInput acquisition.
-                if (vt_->logiTrueForceSupportedByDirectInputW)
                 {
-                    log::Info("[gwheel] TFBE.open[4] calling logiTrueForceSupportedByDirectInputW");
-                    const bool tfSupported = vt_->logiTrueForceSupportedByDirectInputW(ctx.device);
-                    log::InfoF("[gwheel] TFBE.open[4] returned %s", tfSupported ? "true" : "false");
-                    if (!tfSupported)
-                    {
-                        log::Warn("[gwheel] TFBE.open: wheel reports no TrueForce support; aborting");
-                        ctx.device->Release();
-                        return false;
-                    }
+                    char nameUtf8[256] = {};
+                    WideCharToMultiByte(CP_UTF8, 0, ctx.productName, -1,
+                                        nameUtf8, sizeof(nameUtf8), nullptr, nullptr);
+                    log::InfoF("[gwheel] TFBE.open[3]   productName=\"%s\"", nameUtf8);
                 }
 
-                log::Info("[gwheel] TFBE.open[5] SetDataFormat");
+                log::Info("[gwheel] TFBE.open[4] SetDataFormat");
                 if (FAILED(ctx.device->SetDataFormat(&c_dfDIJoystick2)))
                 {
-                    log::Warn("[gwheel] TFBE.open[5.x] SetDataFormat failed");
+                    log::Warn("[gwheel] TFBE.open[4.x] SetDataFormat failed");
                     ctx.device->Release();
                     return false;
                 }
 
-                // Use NON-EXCLUSIVE cooperative level. Exclusive racing with
-                // the game's own DInput layer is the leading suspect for
-                // the v2.31.2 crash; the TrueForce SDK should manage FFB
-                // submission internally without needing exclusive on us.
-                log::Info("[gwheel] TFBE.open[6] SetCooperativeLevel(BACKGROUND|NONEXCLUSIVE)");
+                log::Info("[gwheel] TFBE.open[5] SetCooperativeLevel(BACKGROUND|NONEXCLUSIVE)");
                 if (FAILED(ctx.device->SetCooperativeLevel(hwnd,
                                                            DISCL_BACKGROUND | DISCL_NONEXCLUSIVE)))
                 {
-                    log::Warn("[gwheel] TFBE.open[6.x] SetCooperativeLevel failed");
+                    log::Warn("[gwheel] TFBE.open[5.x] SetCooperativeLevel failed");
                     ctx.device->Release();
                     return false;
                 }
 
-                // DO NOT call Acquire here. The TrueForce SDK is expected
-                // to manage acquisition itself when we hand off the device.
-                // Phase-1-crash-2026-05-03: Acquire-before-handoff is the
-                // second leading suspect for the crash; let the SDK do it.
+                // Set signed [-32768, +32767] range on every axis. Default
+                // DInput axis range follows the HID descriptor, which on the
+                // G923 publishes the wheel rotation as UNSIGNED 0..32767 —
+                // that left center at the midpoint of NormalizeSteer's output
+                // (~0.5) so the game saw a permanent half-right turn that
+                // could only be intensified, never relieved. The legacy SDK
+                // applies the same range internally; we have to do it
+                // explicitly because we own this DInput device.
+                DIPROPRANGE range{};
+                range.diph.dwSize       = sizeof(DIPROPRANGE);
+                range.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+                range.diph.dwObj        = 0;
+                range.diph.dwHow        = DIPH_DEVICE;
+                range.lMin              = -32768;
+                range.lMax              = 32767;
+                if (FAILED(ctx.device->SetProperty(DIPROP_RANGE, &range.diph)))
+                    log::Warn("[gwheel] TFBE.open[5] SetProperty(DIPROP_RANGE) failed; "
+                              "axis values may be off-center (see G923 unsigned-axis bug)");
+                else
+                    log::Info("[gwheel] TFBE.open[5] axis range set to [-32768, +32767]");
 
-                if (!vt_->logiWheelOpenByDirectInputW)
-                {
-                    log::Warn("[gwheel] TFBE.open[7.x] logiWheelOpenByDirectInputW not bound");
-                    ctx.device->Release();
-                    return false;
-                }
-                log::Info("[gwheel] TFBE.open[7] CALLING logiWheelOpenByDirectInputW (THE risky call)");
-                const int handle = vt_->logiWheelOpenByDirectInputW(ctx.device);
-                log::InfoF("[gwheel] TFBE.open[7] returned handle=%d", handle);
-                if (handle < 0)
-                {
-                    log::WarnF("[gwheel] TFBE.open[7.x] logiWheelOpenByDirectInputW returned %d", handle);
-                    ctx.device->Release();
-                    return false;
-                }
-
-                // Acquire AFTER the SDK has taken ownership, so Pump can
-                // GetDeviceState for axes/buttons. NONEXCLUSIVE means this
-                // shouldn't fight game-side acquisition.
-                log::Info("[gwheel] TFBE.open[8] Acquire");
                 if (FAILED(ctx.device->Acquire()))
-                    log::Warn("[gwheel] TFBE.open[8] Acquire failed (input polling may return empty state)");
+                    log::Warn("[gwheel] TFBE.open[5] Acquire failed (input polling may return empty state)");
+
+                // ---- Skip OpenByDirectInputW entirely -----------------------
+                //
+                // 2026-05-04 diagnostic finding: TrueForce auto-detects
+                // connected wheels at dllOpen time and assigns them indices
+                // starting at 0. logiTrueForceSupported(0) returned true on
+                // first launch with a G923 attached, BEFORE we ever called
+                // OpenByDirectInputW. That gives us a valid wheelHandle
+                // without needing the broken-ABI ByDirectInput exports at all.
+                //
+                // The DInput device we just created above is for OUR input
+                // polling (axes/buttons via GetDeviceState in Pump). The SDK
+                // has its own internal DInput for FFB submission.
+                if (!vt_->logiTrueForceSupported)
+                {
+                    log::Warn("[gwheel] TFBE.open[6.x] logiTrueForceSupported not bound");
+                    ctx.device->Unacquire();
+                    ctx.device->Release();
+                    permanentFailure_.store(true, std::memory_order_release);
+                    return false;
+                }
+
+                log::Info("[gwheel] TFBE.open[6] verifying logiTrueForceSupported(0) (the index-based path)");
+                auto supRes = Seh_BoolByInt(reinterpret_cast<void*>(vt_->logiTrueForceSupported), 0);
+                if (!supRes.survived)
+                {
+                    log::WarnF("[gwheel] TFBE.open[6.x] logiTrueForceSupported(0) crashed code=0x%08lX",
+                               supRes.exceptionCode);
+                    ctx.device->Unacquire();
+                    ctx.device->Release();
+                    permanentFailure_.store(true, std::memory_order_release);
+                    return false;
+                }
+                log::InfoF("[gwheel] TFBE.open[6] logiTrueForceSupported(0) = %s",
+                           supRes.result ? "true" : "false");
+                if (!supRes.result)
+                {
+                    log::Warn("[gwheel] TFBE.open[6.x] SDK reports no TrueForce wheel at index 0");
+                    ctx.device->Unacquire();
+                    ctx.device->Release();
+                    permanentFailure_.store(true, std::memory_order_release);
+                    return false;
+                }
+
+                const int handle = 0;
+                log::InfoF("[gwheel] TFBE.open[7] using wheel handle=%d (SDK auto-detected)", handle);
 
                 dinputDevice_ = ctx.device;
                 wheelHandle_  = handle;
+
+                // ---- Post-open SDK probe battery ----
+                //
+                // 2026-05-04 finding: TrueForceBackend opened cleanly and
+                // FFB pipeline computed values, but user felt nothing.
+                // Hypotheses being tested:
+                //   1. SDK starts in paused state (IsPaused → Resume)
+                //   2. Default gain is 0 (SetGainKF / SetGainTF set to 1)
+                //   3. GetMaxPeakTorqueKF signature wrong, silently returns garbage
+                //   4. SetTorqueKF signature wrong, silently no-ops
+
+                // Probe IsPaused / Resume. Both are int-only-arg shapes that
+                // we already know don't crash for index 0 (Supported worked).
+                if (vt_->logiTrueForceIsPaused)
+                {
+                    auto r = Seh_BoolByInt(reinterpret_cast<void*>(vt_->logiTrueForceIsPaused), 0);
+                    if (!r.survived)
+                        log::WarnF("[gwheel] TFBE.open[8] IsPaused(0) crashed code=0x%08lX", r.exceptionCode);
+                    else
+                        log::InfoF("[gwheel] TFBE.open[8] IsPaused(0) = %s",
+                                   r.result ? "true (paused — expected to suppress FFB)" : "false (unpaused)");
+                }
+                if (vt_->logiTrueForceResume)
+                {
+                    auto r = Seh_BoolByInt(reinterpret_cast<void*>(vt_->logiTrueForceResume), 0);
+                    if (!r.survived)
+                        log::WarnF("[gwheel] TFBE.open[8] Resume(0) crashed code=0x%08lX", r.exceptionCode);
+                    else
+                        log::InfoF("[gwheel] TFBE.open[8] Resume(0) returned %s",
+                                   r.result ? "true" : "false");
+                }
+                if (vt_->logiTrueForceIsPaused)
+                {
+                    auto r = Seh_BoolByInt(reinterpret_cast<void*>(vt_->logiTrueForceIsPaused), 0);
+                    if (r.survived)
+                        log::InfoF("[gwheel] TFBE.open[8] IsPaused(0) after Resume = %s",
+                                   r.result ? "true (UNEXPECTED — Resume failed?)" : "false");
+                }
+
+                // Probe SetGainKF/TF at maximum gain. Default may be 0.
+                if (vt_->logiTrueForceSetGainKF)
+                {
+                    auto r = Seh_BoolByIntDouble(
+                        reinterpret_cast<void*>(vt_->logiTrueForceSetGainKF), 0, 1.0);
+                    log::InfoF("[gwheel] TFBE.open[8] SetGainKF(0, 1.0) -> %s%s",
+                               r.survived ? "SURVIVED" : "CRASHED",
+                               r.survived ? (r.result ? " result=true" : " result=false") : "");
+                    if (!r.survived) log::WarnF("[gwheel] TFBE.open[8]   code=0x%08lX", r.exceptionCode);
+                }
+                if (vt_->logiTrueForceSetGainTF)
+                {
+                    auto r = Seh_BoolByIntDouble(
+                        reinterpret_cast<void*>(vt_->logiTrueForceSetGainTF), 0, 1.0);
+                    log::InfoF("[gwheel] TFBE.open[8] SetGainTF(0, 1.0) -> %s%s",
+                               r.survived ? "SURVIVED" : "CRASHED",
+                               r.survived ? (r.result ? " result=true" : " result=false") : "");
+                    if (!r.survived) log::WarnF("[gwheel] TFBE.open[8]   code=0x%08lX", r.exceptionCode);
+                }
+
+                // Probe Available + recheck after Resume. Reuses Seh_TFAvailable
+                // pattern but inline; the loader's helpers live in a different
+                // translation unit so we duplicate the SEH wrap here.
+                {
+                    auto r = Seh_BoolNoArg(reinterpret_cast<void*>(vt_->logiTrueForceAvailable));
+                    if (r.survived)
+                        log::InfoF("[gwheel] TFBE.open[8] Available() post-Resume = %s",
+                                   r.result ? "true" : "false");
+                }
 
                 // Capture device info + capabilities.
                 {
@@ -489,10 +740,18 @@ namespace gwheel::wheel_backend
                     WideCharToMultiByte(CP_UTF8, 0, ctx.productName, -1,
                                         i.productName, sizeof(i.productName),
                                         nullptr, nullptr);
+                    // SEH-wrap GetOperatingRangeDegrees — its signature is also
+                    // a guess, and the previous run showed it apparently
+                    // returned no useful value (range=0 deg in the open log).
                     if (vt_->logiWheelGetOperatingRangeDegrees)
                     {
                         double deg = 0.0;
-                        if (vt_->logiWheelGetOperatingRangeDegrees(wheelHandle_, &deg))
+                        auto r = Seh_BoolByIntDoublePtr(
+                            reinterpret_cast<void*>(vt_->logiWheelGetOperatingRangeDegrees),
+                            wheelHandle_, &deg);
+                        log::InfoF("[gwheel] TFBE.open[8] GetOperatingRangeDegrees -> %s deg=%.1f",
+                                   r.survived ? (r.result ? "OK" : "FAIL") : "CRASHED", deg);
+                        if (r.survived && r.result && deg > 0.0)
                             i.operatingRangeDeg = static_cast<int>(deg);
                     }
                     std::lock_guard lk(infoMtx_);
@@ -501,14 +760,16 @@ namespace gwheel::wheel_backend
                         cachedRangeDeg_.store(i.operatingRangeDeg, std::memory_order_release);
                 }
 
-                // Cache max peak torque so PlayConstant can map normalized
-                // magnitude to Nm. Falls back to a reasonable estimate if
-                // the SDK readback fails.
+                // Cache max peak torque (SEH-protected this time).
                 if (vt_->logiTrueForceGetMaxPeakTorqueKF)
                 {
                     double nm = 0.0;
-                    if (vt_->logiTrueForceGetMaxPeakTorqueKF(wheelHandle_, &nm) && nm > 0.0)
-                        maxPeakTorqueNm_ = nm;
+                    auto r = Seh_BoolByIntDoublePtr(
+                        reinterpret_cast<void*>(vt_->logiTrueForceGetMaxPeakTorqueKF),
+                        wheelHandle_, &nm);
+                    log::InfoF("[gwheel] TFBE.open[8] GetMaxPeakTorqueKF -> %s nm=%.3f",
+                               r.survived ? (r.result ? "OK" : "FAIL") : "CRASHED", nm);
+                    if (r.survived && r.result && nm > 0.0) maxPeakTorqueNm_ = nm;
                 }
                 if (maxPeakTorqueNm_ <= 0.0)
                     maxPeakTorqueNm_ = 2.5; // G923 spec is ~2.3 Nm peak; conservative default
@@ -569,6 +830,10 @@ namespace gwheel::wheel_backend
             double                        maxPeakTorqueNm_ = 0.0;
 
             std::atomic<bool>     ready_{false};
+            // Latched after a signature-probe pass returns surviveMask=0 so
+            // we don't retry-storm. SEH-caught AVs leave the SDK's internal
+            // state corrupted; one pass per session is the safe ceiling.
+            std::atomic<bool>     permanentFailure_{false};
             std::atomic<float>    globalGain_{1.f};
             std::atomic<int>      cachedRangeDeg_{540};
             std::atomic<uint32_t> openAttempts_{0};

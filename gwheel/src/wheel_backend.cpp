@@ -20,13 +20,43 @@ namespace gwheel::wheel_backend
 
         bool TrueForceApplicable()
         {
-            // User must opt in via FOMOD or hand-edited config.json. Default
-            // is OFF — even on a TrueForce-capable wheel we ship the legacy
-            // path until the user (or the FOMOD installer) flips the flag.
-            // Once trueforce::Initialize has run, IsActive reflects whether
-            // the DLL was found, loaded, and exports were resolved.
-            return config::Current().trueForce.enabled
-                && trueforce::IsActive();
+            // ----------------------------------------------------------------
+            // TrueForce backend is LOCKED OFF as of 2026-05-04 pending either:
+            //   1. Official Logitech SDK headers (dev support email outstanding)
+            //   2. A confirmed-working sample integration we can disassemble
+            //   3. Community reverse-engineering of the IPC protocol
+            //
+            // Forensic summary of what we proved this round:
+            //   - DLL loads cleanly: trueforce_sdk_x64.dll v1.3.11 at
+            //     %ProgramFiles%\Logi\Trueforce\1_3_11\.
+            //   - All 75 exports resolve via GetProcAddress.
+            //   - dllOpen() returns true.
+            //   - logiTrueForceSupported(0) returns true (SDK detects G923).
+            //   - logiTrueForceAvailable() returns false or AVs (0xC0000005).
+            //   - Resume(0) returns true but IsPaused(0) stays true.
+            //   - Get* (range, peak torque, angle) return "OK" with zeroed outputs.
+            //   - All Set* (torque, gain, damping) return true but never reach the wheel.
+            //   - Behavior is IDENTICAL inside CP2077 and in a 100-line standalone
+            //     probe (tools/trueforce_probe.exe) — not process-specific.
+            //   - Partner-game-running hypothesis falsified: Forza Horizon 5 and
+            //     Assetto Corsa both running did NOT change disconnected state.
+            //     Original AC uses DInput, not the SDK; Forza had no SDK DLL
+            //     visible in its install dir.
+            //   - Named pipe \\.\pipe\logi.trueforce.connect exists and is
+            //     reachable from arbitrary processes (PowerShell connects fine),
+            //     but the SDK-internal handshake never completes.
+            //
+            // Net: dllOpen runs in a permanent disconnected stub mode. Without
+            // protocol knowledge or a known-working comparison process, we cannot
+            // bridge the gap. The architecture below stays in place; lighting
+            // up TrueForce becomes a single-file change to this predicate plus
+            // signature corrections in wheel_backend_logi_trueforce.cpp once we
+            // have the protocol info.
+            return false;
+
+            // Original logic, kept as a comment for the day this lights up:
+            // return config::Current().trueForce.enabled
+            //     && trueforce::IsActive();
         }
 
         bool LegacyApplicable()
