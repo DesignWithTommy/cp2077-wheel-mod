@@ -119,6 +119,11 @@ namespace gwheel::config
             }
             out << "  },\n";
 
+            out << "  \"trueForce\": {\n";
+            out << "    \"enabled\": "     << (c.trueForce.enabled ? "true" : "false")     << ",\n";
+            out << "    \"feedSignals\": " << (c.trueForce.feedSignals ? "true" : "false") << "\n";
+            out << "  },\n";
+
             auto emitVeh = [&](const char* name, const PerVehicle& pv, bool last) {
                 out << "    \"" << name << "\": { "
                     << "\"steeringMultiplier\": " << pv.steeringMultiplier << ", "
@@ -281,6 +286,9 @@ namespace gwheel::config
             ExtractBool  (text, "led",      "visualizerWhileMusic",   c.led.visualizerWhileMusic);
 
             ExtractString(text, "music",    "processName",            c.music.processName);
+
+            ExtractBool  (text, "trueForce", "enabled",               c.trueForce.enabled);
+            ExtractBool  (text, "trueForce", "feedSignals",           c.trueForce.feedSignals);
 
             auto vehExtract = [&](const char* section, PerVehicle& pv) {
                 ExtractFloat(text, section, "steeringMultiplier", pv.steeringMultiplier);
@@ -461,6 +469,9 @@ namespace gwheel::config
         std::string s(v);
         Mutate([&](Config& c){ c.music.processName = s; });
     }
+
+    void SetTrueForceEnabled(bool v)        { Mutate([&](Config& c){ c.trueForce.enabled = v; }); }
+    void SetTrueForceFeedSignals(bool v)    { Mutate([&](Config& c){ c.trueForce.feedSignals = v; }); }
 
     void SetActionBinding(std::string_view name, std::string_view value)
     {

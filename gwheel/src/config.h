@@ -119,6 +119,33 @@ namespace gwheel::config
         bool visualizerWhileMusic = true;
     };
 
+    struct TrueForce
+    {
+        // Master enable for the TrueForce vibrotactile channel
+        // (G923 / G Pro and successors). Off by default; the FOMOD
+        // installer ships a config.json with this set to true for
+        // Vortex users, manual installers opt in by editing the file.
+        //
+        // Even when true, the runtime probe still has to find a
+        // usable trueforce_sdk_x64.dll on the user's machine
+        // (provided by their existing G HUB install). If the probe
+        // fails, the feature silently disables itself and emits a
+        // single explanatory line to gwheel-*.log. We never bundle
+        // or redistribute the DLL; the user's licensed copy is the
+        // only one in play.
+        bool enabled = false;
+
+        // Independent opt-in for the TF (vibrotactile) audio-stream
+        // channel. Default false even when `enabled` is true, so users
+        // can validate the TrueForce backend's kinesthetic path
+        // (torque + damping + LEDs through the modern SDK) before
+        // committing to the higher-risk TF synthesis. When true and the
+        // active backend reports caps.vibrotactile, the TF pipeline
+        // (wheel_tf_pipeline.cpp) feeds engine RPM + suspension impacts
+        // + skid texture into logiTrueForceSetTorqueTFfloat each tick.
+        bool feedSignals = false;
+    };
+
     struct Music
     {
         // Target process name for per-process audio capture. Empty =
@@ -141,12 +168,13 @@ namespace gwheel::config
 
     struct Config
     {
-        int32_t     version = 5;
+        int32_t     version = 6;
         Input       input;
         Ffb         ffb;
         Handshake   handshake;
         Led         led;
         Music       music;
+        TrueForce   trueForce;
         PerVehicle  car        = { 1.0f, 20 };
         PerVehicle  motorcycle = { 1.2f, 10 };
         PerVehicle  truck      = { 0.8f, 40 };
@@ -196,6 +224,9 @@ namespace gwheel::config
     void SetLedVisualizerWhileMusic(bool v);
 
     void SetMusicProcessName(std::string_view v);
+
+    void SetTrueForceEnabled(bool v);
+    void SetTrueForceFeedSignals(bool v);
 
     // Action binding setter. `name` is the action key (e.g. "SteerAxis");
     // `value` is the delimited tagged-token string from the InputBinding

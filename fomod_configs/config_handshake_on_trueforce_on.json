@@ -1,0 +1,9 @@
+{
+  "version": 6,
+  "handshake": {
+    "playOnStart": true
+  },
+  "trueForce": {
+    "enabled": true
+  }
+}

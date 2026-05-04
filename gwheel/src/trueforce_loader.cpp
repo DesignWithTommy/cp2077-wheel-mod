@@ -1,0 +1,381 @@
+#include "trueforce_loader.h"
+#include "config.h"
+#include "logging.h"
+#include "trueforce_api.h"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <atomic>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+namespace gwheel::trueforce
+{
+    namespace
+    {
+        constexpr wchar_t kDllName[] = L"trueforce_sdk_x64.dll";
+
+        struct State
+        {
+            std::atomic<bool> active{false};
+            HMODULE           hMod = nullptr;
+            api::Vtable       vt;
+            std::wstring      resolvedPath;
+        };
+
+        State& S()
+        {
+            static State s;
+            return s;
+        }
+
+        // Read a string value from HKLM\<subkey>\<name>. Returns empty on
+        // any failure; caller decides what to do with that.
+        std::wstring ReadHklmString(const wchar_t* subkey, const wchar_t* name)
+        {
+            HKEY hKey = nullptr;
+            // KEY_WOW64_64KEY: G HUB writes its install location under the
+            // 64-bit hive even though the registry redirector might otherwise
+            // route us elsewhere when this DLL is loaded into a 64-bit host.
+            LONG rc = RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey, 0,
+                                    KEY_READ | KEY_WOW64_64KEY, &hKey);
+            if (rc != ERROR_SUCCESS) return {};
+
+            DWORD type = 0;
+            DWORD cb = 0;
+            rc = RegQueryValueExW(hKey, name, nullptr, &type, nullptr, &cb);
+            if (rc != ERROR_SUCCESS || type != REG_SZ || cb == 0)
+            {
+                RegCloseKey(hKey);
+                return {};
+            }
+
+            std::wstring out(cb / sizeof(wchar_t), L'\0');
+            rc = RegQueryValueExW(hKey, name, nullptr, &type,
+                                  reinterpret_cast<LPBYTE>(out.data()), &cb);
+            RegCloseKey(hKey);
+            if (rc != ERROR_SUCCESS) return {};
+
+            // Trim trailing NULs that the registry tends to leave.
+            while (!out.empty() && out.back() == L'\0') out.pop_back();
+            return out;
+        }
+
+        std::wstring ExpandEnv(const wchar_t* var)
+        {
+            wchar_t buf[MAX_PATH];
+            DWORD n = GetEnvironmentVariableW(var, buf, MAX_PATH);
+            if (n == 0 || n >= MAX_PATH) return {};
+            return std::wstring(buf, n);
+        }
+
+        std::string Utf8(const std::wstring& w)
+        {
+            if (w.empty()) return {};
+            int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1,
+                                        nullptr, 0, nullptr, nullptr);
+            if (n <= 1) return {};
+            std::string out(static_cast<size_t>(n - 1), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1,
+                                out.data(), n, nullptr, nullptr);
+            return out;
+        }
+
+        // Walk one level under a Logi\Trueforce install root for the
+        // version-named subdirectory holding the DLL. Modern G HUB lays
+        // these out as e.g. `Logi\Trueforce\1_3_11\trueforce_sdk_x64.dll`
+        // — version subfolder is underscore-separated and changes with
+        // every TrueForce SDK push. If multiple versions are installed
+        // (uncommon), descending lexicographic order picks the highest
+        // for the typical `MAJOR_MINOR_PATCH` shape.
+        std::wstring FindInVersionedRoot(const std::wstring& root)
+        {
+            if (root.empty()) return {};
+            std::error_code ec;
+            std::filesystem::path base(root);
+            if (!std::filesystem::exists(base, ec)) return {};
+
+            std::vector<std::filesystem::path> dirs;
+            for (auto& entry : std::filesystem::directory_iterator(base, ec))
+            {
+                if (ec) break;
+                if (entry.is_directory(ec)) dirs.push_back(entry.path());
+            }
+            // Highest version first.
+            std::sort(dirs.begin(), dirs.end(),
+                      [](const auto& a, const auto& b) { return a > b; });
+
+            for (const auto& dir : dirs)
+            {
+                auto candidate = dir / kDllName;
+                if (std::filesystem::exists(candidate, ec))
+                    return candidate.wstring();
+            }
+            return {};
+        }
+
+        // Build the candidate-path list in priority order. First hit wins.
+        //
+        // Modern G HUB (verified on 2026-05-03 against trueforce_sdk
+        // extension v1.3.11) deploys the DLL via trueforce_manager.exe
+        // to `%ProgramFiles%\Logi\Trueforce\<version>\` per the manifest
+        // at ProgramData\LGHUB\depots\<id>\trueforce_sdk\manifest.json.
+        // Older fallback paths cover G HUB layouts that bundled the DLL
+        // directly under the LGHUB install dir.
+        std::vector<std::wstring> BuildCandidatePaths()
+        {
+            std::vector<std::wstring> paths;
+
+            // 1) Canonical Logi\Trueforce install (current G HUB).
+            //    Walk the versioned subdirectory tree.
+            for (auto base : {
+                     L"C:\\Program Files\\Logi\\Trueforce",
+                     L"C:\\Program Files (x86)\\Logi\\Trueforce",
+                 })
+            {
+                if (auto hit = FindInVersionedRoot(base); !hit.empty())
+                {
+                    paths.push_back(hit);
+                    break;
+                }
+            }
+            // %ProgramFiles%-relative variant in case the install is on
+            // a non-C: drive.
+            if (auto pf = ExpandEnv(L"ProgramFiles"); !pf.empty())
+            {
+                if (auto hit = FindInVersionedRoot(pf + L"\\Logi\\Trueforce");
+                    !hit.empty())
+                    paths.push_back(hit);
+            }
+            if (auto pf86 = ExpandEnv(L"ProgramFiles(x86)"); !pf86.empty())
+            {
+                if (auto hit = FindInVersionedRoot(pf86 + L"\\Logi\\Trueforce");
+                    !hit.empty())
+                    paths.push_back(hit);
+            }
+
+            // 2) Legacy LGHUB install path (older G HUB releases that
+            //    shipped the DLL directly under the LGHUB folder).
+            for (auto subkey : {
+                     L"SOFTWARE\\Logitech\\LGHUB",
+                     L"SOFTWARE\\WOW6432Node\\Logitech\\LGHUB",
+                 })
+            {
+                auto v = ReadHklmString(subkey, L"InstallLocation");
+                if (v.empty())
+                    v = ReadHklmString(subkey, L"InstallDir");
+                if (!v.empty())
+                {
+                    if (v.back() != L'\\' && v.back() != L'/') v.push_back(L'\\');
+                    paths.push_back(v + kDllName);
+                }
+            }
+            for (auto base : {
+                     L"C:\\Program Files\\LGHUB\\",
+                     L"C:\\Program Files (x86)\\LGHUB\\",
+                 })
+            {
+                paths.emplace_back(std::wstring(base) + kDllName);
+            }
+
+            return paths;
+        }
+
+        // Bind every export the wheel backend will use. Names are
+        // confirmed against the v1.3.11 export dump; signatures are
+        // best-guess until we have official headers (mismatched
+        // signatures will manifest as crashes the first time a given
+        // export is called).
+        bool ResolveExports(HMODULE hMod, api::Vtable& vt)
+        {
+            int missing = 0;
+            auto bind = [&](auto& slot, const char* name)
+            {
+                using T = std::remove_reference_t<decltype(slot)>;
+                slot = reinterpret_cast<T>(
+                    reinterpret_cast<void*>(GetProcAddress(hMod, name)));
+                if (!slot)
+                {
+                    ++missing;
+                    log::DebugF("[gwheel] trueforce: export '%s' not found", name);
+                }
+            };
+
+            // Lifecycle
+            bind(vt.dllOpen,                     "dllOpen");
+            bind(vt.dllClose,                    "dllClose");
+            bind(vt.logiWheelOpenByDirectInputW, "logiWheelOpenByDirectInputW");
+            bind(vt.logiWheelClose,              "logiWheelClose");
+            bind(vt.logiWheelSdkHasControl,      "logiWheelSdkHasControl");
+            bind(vt.logiWheelGetVersion,         "logiWheelGetVersion");
+            bind(vt.logiWheelGetCoreLibraryVersion, "logiWheelGetCoreLibraryVersion");
+
+            // Capability
+            bind(vt.logiTrueForceAvailable,             "logiTrueForceAvailable");
+            bind(vt.logiTrueForceSupported,             "logiTrueForceSupported");
+            bind(vt.logiTrueForceSupportedByDirectInputW,
+                 "logiTrueForceSupportedByDirectInputW");
+            bind(vt.logiWheelSupportedByDirectInputW,
+                 "logiWheelSupportedByDirectInputW");
+
+            // Force mode
+            bind(vt.logiWheelGetForceMode, "logiWheelGetForceMode");
+            bind(vt.logiWheelSetForceMode, "logiWheelSetForceMode");
+
+            // Range
+            bind(vt.logiWheelSetOperatingRangeDegrees,
+                 "logiWheelSetOperatingRangeDegrees");
+            bind(vt.logiWheelGetOperatingRangeDegrees,
+                 "logiWheelGetOperatingRangeDegrees");
+
+            // Wheel state
+            bind(vt.logiTrueForceGetAngleDegrees,
+                 "logiTrueForceGetAngleDegrees");
+            bind(vt.logiTrueForceGetAngularVelocityDegrees,
+                 "logiTrueForceGetAngularVelocityDegrees");
+
+            // Pause/sync
+            bind(vt.logiTrueForcePause,         "logiTrueForcePause");
+            bind(vt.logiTrueForceResume,        "logiTrueForceResume");
+            bind(vt.logiTrueForceIsPaused,      "logiTrueForceIsPaused");
+            bind(vt.logiTrueForceSync,          "logiTrueForceSync");
+            bind(vt.logiTrueForceGetHapticRate, "logiTrueForceGetHapticRate");
+
+            // KF
+            bind(vt.logiTrueForceSetTorqueKF,             "logiTrueForceSetTorqueKF");
+            bind(vt.logiTrueForceClearKF,                 "logiTrueForceClearKF");
+            bind(vt.logiTrueForceSetGainKF,               "logiTrueForceSetGainKF");
+            bind(vt.logiTrueForceGetMaxPeakTorqueKF,      "logiTrueForceGetMaxPeakTorqueKF");
+            bind(vt.logiTrueForceGetMaxContinuousTorqueKF, "logiTrueForceGetMaxContinuousTorqueKF");
+            bind(vt.logiTrueForceSetTorqueKFPiecewise,    "logiTrueForceSetTorqueKFPiecewise");
+
+            // TF
+            bind(vt.logiTrueForceSetTorqueTFfloat,  "logiTrueForceSetTorqueTFfloat");
+            bind(vt.logiTrueForceSetTorqueTFdouble, "logiTrueForceSetTorqueTFdouble");
+            bind(vt.logiTrueForceSetTorqueTFint16,  "logiTrueForceSetTorqueTFint16");
+            bind(vt.logiTrueForceSetStreamTF,       "logiTrueForceSetStreamTF");
+            bind(vt.logiTrueForceClearTF,           "logiTrueForceClearTF");
+            bind(vt.logiTrueForceSetGainTF,         "logiTrueForceSetGainTF");
+            bind(vt.logiTrueForceGetTorqueTFRateBounds, "logiTrueForceGetTorqueTFRateBounds");
+
+            // Damping
+            bind(vt.logiTrueForceSetDamping,    "logiTrueForceSetDamping");
+            bind(vt.logiTrueForceGetDamping,    "logiTrueForceGetDamping");
+            bind(vt.logiTrueForceGetDampingMax, "logiTrueForceGetDampingMax");
+
+            // LEDs
+            bind(vt.logiWheelPlayLeds,   "logiWheelPlayLeds");
+            bind(vt.logiWheelSetRpmLeds, "logiWheelSetRpmLeds");
+
+            log::InfoF("[gwheel] trueforce: bound exports (missing=%d)", missing);
+
+            // Minimum required for backend selection to succeed: we must
+            // be able to open the wheel, set torque on KF, set TF, and
+            // probe support. Other exports are nice-to-haves.
+            return vt.dllOpen
+                && vt.logiWheelOpenByDirectInputW
+                && vt.logiWheelClose
+                && vt.logiTrueForceSupportedByDirectInputW
+                && vt.logiTrueForceSetTorqueKF
+                && vt.logiTrueForceSetTorqueTFfloat;
+        }
+    }
+
+    void Initialize()
+    {
+        auto& st = S();
+        if (st.active.load(std::memory_order_acquire))
+            return;
+
+        const auto cfg = config::Current();
+        if (!cfg.trueForce.enabled)
+        {
+            log::Info("[gwheel] trueforce: disabled in config "
+                      "(trueForce.enabled = false) — skipping probe");
+            return;
+        }
+
+        log::Info("[gwheel] trueforce: probing G HUB installation for "
+                  "trueforce_sdk_x64.dll");
+
+        const auto candidates = BuildCandidatePaths();
+        std::wstring picked;
+        for (const auto& p : candidates)
+        {
+            std::error_code ec;
+            const bool exists = std::filesystem::exists(p, ec);
+            log::DebugF("[gwheel] trueforce: candidate %s -> %s",
+                        Utf8(p).c_str(),
+                        exists ? "exists" : "missing");
+            if (exists) { picked = p; break; }
+        }
+
+        if (picked.empty())
+        {
+            log::Warn("[gwheel] trueforce: DLL not found in any known G HUB "
+                      "location — feature disabled. Install or repair G HUB, "
+                      "or set trueForce.enabled=false in config.json to "
+                      "silence this probe.");
+            return;
+        }
+
+        st.hMod = LoadLibraryW(picked.c_str());
+        if (!st.hMod)
+        {
+            log::WarnF("[gwheel] trueforce: LoadLibrary failed for %s "
+                       "(GetLastError=%lu) — feature disabled",
+                       Utf8(picked).c_str(), GetLastError());
+            return;
+        }
+
+        st.resolvedPath = picked;
+        log::InfoF("[gwheel] trueforce: loaded DLL from %s",
+                   Utf8(picked).c_str());
+
+        if (!ResolveExports(st.hMod, st.vt))
+        {
+            log::Warn("[gwheel] trueforce: export resolution incomplete "
+                      "(symbol names pending SDK access). DLL is loaded "
+                      "but per-signal calls are no-ops.");
+            return;
+        }
+
+        if (st.vt.dllOpen && !st.vt.dllOpen())
+        {
+            log::Warn("[gwheel] trueforce: dllOpen() returned false "
+                      "— feature disabled.");
+            return;
+        }
+
+        st.active.store(true, std::memory_order_release);
+        log::Info("[gwheel] trueforce: active (vtable bound, dllOpen ok)");
+    }
+
+    void Shutdown()
+    {
+        auto& st = S();
+        if (st.active.load(std::memory_order_acquire) && st.vt.dllClose)
+            st.vt.dllClose();
+        if (st.hMod)
+        {
+            FreeLibrary(st.hMod);
+            st.hMod = nullptr;
+        }
+        st.vt = {};
+        st.active.store(false, std::memory_order_release);
+    }
+
+    bool IsActive()
+    {
+        return S().active.load(std::memory_order_acquire);
+    }
+
+    const api::Vtable* Vtable()
+    {
+        auto& st = S();
+        if (!st.active.load(std::memory_order_acquire)) return nullptr;
+        return &st.vt;
+    }
+}

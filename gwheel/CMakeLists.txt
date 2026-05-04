@@ -16,6 +16,12 @@ set(GWHEEL_SOURCES
   src/audio_monitor.cpp
   src/led.cpp
   src/mod_settings_seed.cpp
+  src/trueforce_loader.cpp
+  src/logi_common.cpp
+  src/wheel_backend.cpp
+  src/wheel_backend_logi_legacy.cpp
+  src/wheel_backend_logi_trueforce.cpp
+  src/wheel_tf_pipeline.cpp
 )
 
 set(GWHEEL_HEADERS
@@ -36,7 +42,14 @@ set(GWHEEL_HEADERS
   src/audio_monitor.h
   src/led.h
   src/mod_settings_seed.h
+  src/trueforce_loader.h
+  src/logi_common.h
+  src/wheel_backend.h
+  src/wheel_backend_logi_legacy.h
+  src/wheel_backend_logi_trueforce.h
+  src/wheel_tf_pipeline.h
   include/gwheel_abi.h
+  include/trueforce_api.h
 )
 
 add_library(gwheel SHARED

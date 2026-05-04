@@ -4,11 +4,17 @@
 #include "config.h"
 #include "input_bindings.h"
 #include "tweakdb_physics.h"
+#include "logi_common.h"
+#include "wheel_backend.h"
+#include "wheel_tf_pipeline.h"
+#include "sources.h"
 
 #define DIRECTINPUT_VERSION 0x0800
 #include <windows.h>
 #include <dinput.h>
-#include <LogitechSteeringWheelLib.h>
+// LogitechSteeringWheelLib include removed: SDK calls now live entirely
+// inside wheel_backend_logi_legacy.cpp. wheel.cpp is vendor-neutral; it
+// delegates to the active IWheelBackend via g_backend below.
 
 #include <algorithm>
 #include <atomic>
@@ -54,459 +60,94 @@ namespace gwheel::wheel
 
     namespace
     {
-        // Normalize a DIJOYSTATE2 LONG axis. The Logi SDK for the G923
-        // returns bipolar signed 16-bit values in [-32768, +32767]
-        // (verified empirically 2026-04-21 via diagnostic logging).
-        //
-        // Steer: center=0, full-left=-32768, full-right=+32767.
-        // Pedals: idle=+32767, fully-pressed=-32768.
-        float NormalizePedal(LONG v)
+        // The wheel backend handle. Selected at Init() time. Today the
+        // legacy Logitech backend is hard-coded; the factory + TrueForce
+        // selection logic lands in step 13.
+        std::unique_ptr<wheel_backend::IWheelBackend> g_backend;
+
+        // Handshake state. Vendor-neutral (the choreography uses backend
+        // primitives). handshakeFired latches once at first wheel-bind so
+        // the routine plays exactly once per game session.
+        std::atomic<bool> g_handshakeFired{false};
+        std::atomic<bool> g_handshakeActive{false};
+
+        // Plays the gwheel handshake on a detached thread: LED sweep + 4
+        // force triplets synced with LED flashes + 3-second centering
+        // breath pulse. Vendor-neutral: every effect emit goes through
+        // the active backend.
+        void FireGwheelHandshake()
         {
-            constexpr float kMax = 32767.f;
-            constexpr float kRange = 65535.f; // kMax - kMin = 32767 - (-32768)
-            const float t = (kMax - static_cast<float>(v)) / kRange;
-            return std::clamp(t, 0.f, 1.f);
-        }
-
-        float NormalizeSteer(LONG v)
-        {
-            constexpr float kMax = 32767.f;
-            return std::clamp(static_cast<float>(v) / kMax, -1.f, 1.f);
-        }
-
-        struct State
-        {
-            std::atomic<bool>  sdkInitialized{false};
-            std::atomic<bool>  ready{false};
-            std::atomic<int>   index{-1};
-            std::atomic<bool>  hasFFB{false};
-            std::atomic<float> globalStrength{1.0f};
-
-            std::mutex         snapMtx;
-            Snapshot           snap{};
-
-            std::mutex         capsMtx;
-            Caps               caps{};
-
-            std::atomic<uint32_t> initAttempts{0};
-            std::atomic<bool>     handshakeFired{false};
-            std::atomic<bool>     handshakeActive{false};
-
-        };
-
-        State& S() { static State s; return s; }
-
-        // G HUB owns the operating range per-profile. The mod honors it:
-        // once per second we re-read G HUB's live profile range (via
-        // LogiGetCurrentControllerProperties — see CaptureCaps for why
-        // not LogiGetOperatingRange) and cache it into s_ghubRangeDeg,
-        // which ApplyFfbFromPhysics consults to scale FFB magnitude
-        // inversely with wheel rotation (so a 900-deg wheel isn't
-        // weighed down by SAT meant for a tight 180).
-        //
-        // Default starting value is a safe 540 — most G HUB profiles
-        // land in this range, and the value gets overwritten with the
-        // real reading at bind time plus refreshed every second
-        // thereafter. Slider drags in G HUB during gameplay propagate
-        // within ~1 second.
-        std::atomic<int> s_ghubRangeDeg{540};
-
-        // Pick the first LOGI_DEVICE_TYPE_WHEEL index that reports connected.
-        int FindWheelIndex()
-        {
-            for (int i = 0; i < LOGI_MAX_CONTROLLERS; ++i)
-            {
-                if (!LogiIsConnected(i)) continue;
-                if (LogiIsDeviceConnected(i, LOGI_DEVICE_TYPE_WHEEL)) return i;
-            }
-            // Fall back: accept any connected Logitech-manufactured controller.
-            for (int i = 0; i < LOGI_MAX_CONTROLLERS; ++i)
-            {
-                if (!LogiIsConnected(i)) continue;
-                if (LogiIsManufacturerConnected(i, LOGI_MANUFACTURER_LOGITECH)) return i;
-            }
-            return -1;
-        }
-
-        // Only accept a top-level window belonging to the game's own process.
-        // DirectInput (used by the SDK under the hood) rejects foreign HWNDs.
-        HWND FindOwnGameWindow()
-        {
-            const DWORD myPid = GetCurrentProcessId();
-            auto ownedByMe = [&](HWND h) -> bool {
-                if (!h || !IsWindow(h)) return false;
-                DWORD pid = 0;
-                GetWindowThreadProcessId(h, &pid);
-                return pid == myPid;
-            };
-            HWND h = FindWindowW(L"RED4Engine", nullptr);
-            if (ownedByMe(h)) return h;
-            h = FindWindowW(L"Cyberpunk 2077", nullptr);
-            if (ownedByMe(h)) return h;
-
-            struct Ctx { DWORD pid; HWND hit; } ctx{ myPid, nullptr };
-            EnumWindows([](HWND w, LPARAM p) -> BOOL {
-                auto* c = reinterpret_cast<Ctx*>(p);
-                DWORD pid = 0;
-                GetWindowThreadProcessId(w, &pid);
-                if (pid != c->pid) return TRUE;
-                if (!IsWindowVisible(w)) return TRUE;
-                RECT r{};
-                if (!GetClientRect(w, &r) || (r.right - r.left) < 400 || (r.bottom - r.top) < 300)
-                    return TRUE;
-                c->hit = w;
-                return FALSE;
-            }, reinterpret_cast<LPARAM>(&ctx));
-            return ctx.hit;
-        }
-
-        void LogSdkVersion()
-        {
-            auto& st = S();
-            int major = 0, minor = 0, build = 0;
-            if (LogiSteeringGetSdkVersion(&major, &minor, &build))
-            {
-                std::lock_guard lk(st.capsMtx);
-                st.caps.sdkMajor = major;
-                st.caps.sdkMinor = minor;
-                st.caps.sdkBuild = build;
-                log::InfoF("[gwheel] Logitech Steering Wheel SDK v%d.%d build %d", major, minor, build);
-            }
-            else
-            {
-                log::Warn("[gwheel] LogiSteeringGetSdkVersion failed; continuing anyway");
-            }
-        }
-
-        void CaptureCaps(int idx)
-        {
-            auto& st = S();
-            Caps c{};
-            {
-                std::lock_guard lk(st.capsMtx);
-                c = st.caps;
-            }
-
-            wchar_t friendly[256] = {};
-            if (LogiGetFriendlyProductName(idx, friendly, 256))
-            {
-                WideCharToMultiByte(CP_UTF8, 0, friendly, -1,
-                                    c.productName, sizeof(c.productName),
-                                    nullptr, nullptr);
-            }
-            else
-            {
-                std::snprintf(c.productName, sizeof(c.productName),
-                              "Logitech wheel (slot %d)", idx);
-            }
-
-            c.hasFFB = LogiHasForceFeedback(idx);
-
-            // Diagnostic at bind: log both range-readback APIs side-by-
-            // side so any divergence is visible. On a healthy G HUB
-            // install both should return the same value; if they
-            // disagree (or one returns FAILED) that's a strong signal
-            // of a corrupt G HUB IPC layer and the user should
-            // reinstall G HUB before suspecting the mod.
-            //
-            //   LogiGetOperatingRange
-            //     Returns the SDK's operating-range value. This is
-            //     what we use at runtime for FFB scaling — simpler
-            //     call, no extra IPC handshake.
-            //
-            //   LogiGetCurrentControllerProperties().wheelRange
-            //     Queries G HUB for the live profile properties.
-            //     Logged for diagnostic purposes only.
-            int rangeOp = 0;
-            const bool gotOp = LogiGetOperatingRange(idx, rangeOp);
-
-            LogiControllerPropertiesData props{};
-            const bool gotProps = LogiGetCurrentControllerProperties(idx, props);
-            const int rangeProps = gotProps ? props.wheelRange : 0;
-
-            if (gotOp && rangeOp > 0)
-                c.operatingRangeDeg = rangeOp;
-            else if (gotProps && rangeProps > 0)
-                c.operatingRangeDeg = rangeProps;
-
-            char propsBuf[16] = "FAILED";
-            char opBuf[16]    = "FAILED";
-            if (gotProps) std::snprintf(propsBuf, sizeof(propsBuf), "%d", rangeProps);
-            if (gotOp)    std::snprintf(opBuf,    sizeof(opBuf),    "%d", rangeOp);
-            log::InfoF("[gwheel] range readback at bind: SDK=%s G HUB properties=%s "
-                       "(divergence or FAILED on either side suggests a corrupt G HUB install)",
-                       opBuf, propsBuf);
-
-            // Best-effort model probe against the constants this SDK version
-            // actually ships (header tops out at G920; newer wheels report via
-            // the friendlier name path).
-            const int probes[] = {
-                LOGI_MODEL_G920,
-                LOGI_MODEL_G29,
-                LOGI_MODEL_G27,
-                LOGI_MODEL_G25,
-                LOGI_MODEL_DRIVING_FORCE_GT,
-                LOGI_MODEL_DRIVING_FORCE_PRO,
-                LOGI_MODEL_DRIVING_FORCE,
-                LOGI_MODEL_MOMO_RACING,
-                LOGI_MODEL_MOMO_FORCE,
-                LOGI_MODEL_FORMULA_FORCE,
-                LOGI_MODEL_FORMULA_FORCE_GP,
-            };
-            for (int model : probes)
-            {
-                if (LogiIsModelConnected(idx, model))
-                {
-                    log::InfoF("[gwheel] SDK model match: LOGI_MODEL id=%d", model);
-                    break;
-                }
-            }
-
-            {
-                std::lock_guard lk(st.capsMtx);
-                st.caps = c;
-            }
-        }
-
-        // Single entry point for every LED write. Handles the G923
-        // "idle-indicator" quirk: with firstLedOn=0 and currentRPM=0,
-        // the wheel firmware leaves the outermost green LEDs lit as a
-        // "ready to rev" marker. Pushing currentRPM strictly below
-        // firstLedOn (here 100 < 200) guarantees the bar goes fully dark.
-        void WriteLeds(int idx, float value)
-        {
-            if (value <= 0.005f)
-                LogiPlayLeds(idx, 0.f, 100.f, 200.f);
-            else
-                LogiPlayLeds(idx, std::clamp(value, 0.f, 1.f), 0.f, 1.f);
-        }
-
-        void FireGwheelHandshake(int idx)
-        {
-            auto& st = S();
-            if (st.handshakeFired.exchange(true)) return;
-            std::thread([idx] {
+            if (g_handshakeFired.exchange(true)) return;
+            std::thread([] {
                 using namespace std::chrono_literals;
-                auto& st = S();
-
-                // Raise the handshake-active flag for the duration so the
-                // LED controller (led.cpp) yields the bar to us.
-                st.handshakeActive.store(true, std::memory_order_release);
-
+                g_handshakeActive.store(true, std::memory_order_release);
                 log::Info("[gwheel] firing gwheel handshake (LED sweep + 4 triplets + centering breath)");
 
-                // Small helper: linear LED ramp from `from` to `to` over
-                // `total`. Steps at ~33ms (matches the LED controller's
-                // tick rate) for a perceptually smooth sweep without
-                // hammering the SDK.
-                auto ledSweep = [](int deviceIdx, float from, float to,
+                auto ledSweep = [](float from, float to,
                                    std::chrono::milliseconds total) {
                     constexpr auto kStep = std::chrono::milliseconds(33);
                     const int steps = std::max<int>(1, static_cast<int>(total / kStep));
                     for (int i = 1; i <= steps; ++i) {
                         const float t = static_cast<float>(i) / static_cast<float>(steps);
                         const float v = from + (to - from) * t;
-                        WriteLeds(deviceIdx, v);
+                        if (g_backend) g_backend->SetLedLevel(v);
                         std::this_thread::sleep_for(kStep);
                     }
                 };
 
-                // --- LED pre-roll: 400ms sweep-up / sweep-down --------
-                // Replaces the old 400ms idle sleep; same total duration.
-                ledSweep(idx, 0.f, 1.f, 200ms);
-                ledSweep(idx, 1.f, 0.f, 200ms);
+                ledSweep(0.f, 1.f, 200ms);
+                ledSweep(1.f, 0.f, 200ms);
 
-                // --- Triplets: R L R, L R L, R L R, L R L ------------
-                // 300 BPM: quarter note = 200ms. Each beat fires a short
-                // force kick AND flashes the LED bar full for the kick
+                // 300 BPM triplets: quarter note = 200ms. Each beat fires a
+                // short force kick AND flashes the LED bar full for the kick
                 // duration; the bar goes dark between kicks so the lights
                 // track the rhythm instead of blurring together.
                 constexpr int kTriplets[2][3] = {
                     { +1, -1, +1 },   // R L R
                     { -1, +1, -1 },   // L R L
                 };
-                constexpr auto kPulseMs     = 40ms;               // active kick
-                constexpr auto kBeatMs      = 200ms;              // quarter @ 300 BPM
-                constexpr auto kGapMs       = kBeatMs - kPulseMs; // silence within beat
-                constexpr auto kRestMs      = 200ms;              // rest between triplets
-                constexpr int  kMagnitude   = 45;                 // percent
-                constexpr int  kNumTriplets = 4;
+                constexpr auto  kPulseMs     = 40ms;
+                constexpr auto  kBeatMs      = 200ms;
+                constexpr auto  kGapMs       = kBeatMs - kPulseMs;
+                constexpr auto  kRestMs      = 200ms;
+                constexpr float kMagnitude   = 0.45f;
+                constexpr int   kNumTriplets = 4;
 
-                for (int t = 0; t < kNumTriplets; ++t)
-                {
-                    for (int b = 0; b < 3; ++b)
-                    {
-                        LogiPlayConstantForce(idx, kTriplets[t % 2][b] * kMagnitude);
-                        WriteLeds(idx, 1.f);
+                for (int t = 0; t < kNumTriplets; ++t) {
+                    for (int b = 0; b < 3; ++b) {
+                        if (g_backend) {
+                            g_backend->PlayConstant(kTriplets[t % 2][b] * kMagnitude);
+                            g_backend->SetLedLevel(1.f);
+                        }
                         std::this_thread::sleep_for(kPulseMs);
-                        LogiStopConstantForce(idx);
-                        WriteLeds(idx, 0.f);
+                        if (g_backend) {
+                            g_backend->StopConstant();
+                            g_backend->SetLedLevel(0.f);
+                        }
                         std::this_thread::sleep_for(kGapMs);
                     }
                     std::this_thread::sleep_for(kRestMs);
                 }
 
-                // --- Centering hold: 3s spring + LED breath pulse -----
-                // Three 1-second breaths (up 500ms, down 500ms, peak
-                // 70% so a full-scale finish from the prior flashes
-                // reads as "calm" rather than "still alarming"). Total
-                // 3000ms matches the original centering hold window.
-                LogiStopConstantForce(idx);
-                LogiStopDamperForce(idx);
-                const bool springOk = LogiPlaySpringForce(idx, 0, 100, 100);
-                log::InfoF("[gwheel] handshake centering begin (spring=%d) - holding 3s with LED breath",
-                           springOk ? 1 : 0);
+                if (g_backend) {
+                    g_backend->StopConstant();
+                    g_backend->StopDamper();
+                    g_backend->PlaySpring(1.f);
+                }
+                log::Info("[gwheel] handshake centering begin (spring=1.0) - holding 3s with LED breath");
                 for (int i = 0; i < 3; ++i) {
-                    ledSweep(idx, 0.f, 0.7f, 500ms);
-                    ledSweep(idx, 0.7f, 0.f, 500ms);
+                    ledSweep(0.f, 0.7f, 500ms);
+                    ledSweep(0.7f, 0.f, 500ms);
                 }
                 log::Info("[gwheel] handshake centering end - releasing forces");
-                LogiStopSpringForce(idx);
-                LogiStopConstantForce(idx);
-                LogiStopDamperForce(idx);
-
-                // Clear the bar and hand it back to the LED controller.
-                WriteLeds(idx, 0.f);
-                st.handshakeActive.store(false, std::memory_order_release);
-            }).detach();
-        }
-
-        bool TryInitSdk()
-        {
-            auto& st = S();
-            if (st.sdkInitialized.load(std::memory_order_acquire)) return true;
-
-            HWND hwnd = FindOwnGameWindow();
-            const uint32_t n = st.initAttempts.fetch_add(1, std::memory_order_relaxed) + 1;
-            // Log the per-attempt result only on the first try and every ~5s
-            // afterwards (pump thread runs at 250 Hz so ~1250 attempts == 5s).
-            const bool verbose = (n == 1) || (n % 1250 == 0);
-
-            // ignoreXInput=true: on the G923 Xbox variant (and any other Logi
-            // wheel that exposes an XInput face), CP2077 registers an XInput
-            // gamepad which siphons the standard-gamepad bits (ABXY / D-pad /
-            // LSB / RSB / paddles as triggers / Start / Back) away from
-            // DInput. The Logi SDK reads from DInput, so with ignoreXInput=
-            // false we only see the non-XInput extras (scroll rotary, +/-,
-            // Xbox button). Passing true forces the SDK to surface the full
-            // DInput button set even when an XInput client is active in-
-            // process. Standalone (input_probe) saw 20/20 buttons because no
-            // XInput client was live; in-game we saw 7/20 because CP2077's
-            // XInput layer was intercepting. Verified by tools/input_probe.
-            bool ok = false;
-            if (hwnd)
-            {
-                ok = LogiSteeringInitializeWithWindow(true, hwnd);
-                if (verbose || ok)
-                    log::InfoF("[gwheel] LogiSteeringInitializeWithWindow(ignoreXInput=true, hwnd=0x%p) -> %s",
-                               static_cast<void*>(hwnd), ok ? "true" : "false");
-            }
-            else
-            {
-                ok = LogiSteeringInitialize(true);
-                if (verbose)
-                    log::InfoF("[gwheel] LogiSteeringInitialize(ignoreXInput=true) -> %s (no game window yet)",
-                               ok ? "true" : "false");
-            }
-
-            if (!ok)
-            {
-                if (verbose)
-                {
-                    log::WarnF("[gwheel] SDK init did not succeed (attempt %u). "
-                               "Will retry each pump tick. Common causes: G HUB not running, "
-                               "wheel unplugged, or SDK not permitted while another exclusive client holds it.",
-                               n);
+                if (g_backend) {
+                    g_backend->StopSpring();
+                    g_backend->StopConstant();
+                    g_backend->StopDamper();
+                    g_backend->SetLedLevel(0.f);
                 }
-                return false;
-            }
-
-            st.sdkInitialized.store(true, std::memory_order_release);
-            LogSdkVersion();
-            return true;
-        }
-
-        bool TryBindController()
-        {
-            auto& st = S();
-            if (st.ready.load(std::memory_order_acquire)) return true;
-
-            const int idx = FindWheelIndex();
-            if (idx < 0)
-            {
-                const uint32_t n = st.initAttempts.load(std::memory_order_relaxed);
-                if (n == 1 || (n % 250) == 0)
-                    log::Warn("[gwheel] no Logitech wheel detected by the SDK yet - waiting");
-                return false;
-            }
-
-            st.index.store(idx, std::memory_order_release);
-            CaptureCaps(idx);
-
-            const Caps snap = GetCaps();
-            log::InfoF("[gwheel] wheel bound at SDK slot %d: \"%s\" (FFB=%s range=%d deg)",
-                       idx,
-                       snap.productName,
-                       snap.hasFFB ? "yes" : "no",
-                       snap.operatingRangeDeg);
-
-            // Seed the cached G HUB range from the bind-time readback so
-            // FFB scaling has a real value before the 1 Hz sampler fires.
-            if (snap.operatingRangeDeg > 0)
-                s_ghubRangeDeg.store(snap.operatingRangeDeg, std::memory_order_release);
-
-            st.hasFFB.store(snap.hasFFB, std::memory_order_release);
-            st.ready.store(true, std::memory_order_release);
-
-            if (snap.hasFFB)
-            {
-                if (config::Current().handshake.playOnStart)
-                    FireGwheelHandshake(idx);
-                else
-                    log::Info("[gwheel] gwheel handshake disabled by config (handshake.playOnStart=false)");
-            }
-
-            return true;
-        }
-
-        // Torque is applied as a per-effect magnitude multiplier via
-        // wheel::SetGlobalStrength (wired from config::ApplyDerived).
-        // The Logi Properties API is broken on recent G HUB versions —
-        // LogiSetPreferredControllerProperties consistently returns
-        // FAILED — so we can't use the "proper" route of pushing
-        // overallGain to G HUB and letting G HUB scale the output at
-        // the driver level. The per-effect multiplier is reliable and
-        // composes correctly with G HUB's own TRUEFORCE Torque slider.
-
-        // FFB-scale-from-range matches the formula in ApplyFfbFromPhysics
-        // (anchor 180 deg = 1.0, clamp 0.3..1.5). Kept here so the range-
-        // change log line shows the actual scale the user is now feeling.
-        float RangeToFfbScale(int rangeDeg)
-        {
-            const int clamped = std::clamp(rangeDeg, 40, 1080);
-            return std::clamp(180.f / static_cast<float>(clamped), 0.3f, 1.5f);
-        }
-
-        void RefreshGHubRange(int idx)
-        {
-            // Pump runs at ~250 Hz; sample every 1s (≈250 ticks). 1s of
-            // latency is invisible to the user dragging the G HUB slider
-            // and keeps SDK chatter low.
-            static uint64_t s_pumpTicks = 0;
-            if ((++s_pumpTicks % 250) != 0) return;
-
-            int actual = 0;
-            if (!LogiGetOperatingRange(idx, actual) || actual <= 0) return;
-
-            const int prev = s_ghubRangeDeg.exchange(actual, std::memory_order_acq_rel);
-            if (prev != actual)
-            {
-                log::InfoF("[gwheel] operating range (G HUB): %d -> %d deg "
-                           "(FFB scale: %.2f -> %.2f)",
-                           prev, actual,
-                           RangeToFfbScale(prev),
-                           RangeToFfbScale(actual));
-            }
+                g_handshakeActive.store(false, std::memory_order_release);
+            }).detach();
         }
     }
 
@@ -546,338 +187,147 @@ namespace gwheel::wheel
         }
     }
 
+    // ========================================================================
+    // Public wheel:: namespace API. All vendor-specific work happens inside
+    // the active wheel_backend::IWheelBackend implementation; this layer is
+    // a thin dispatch shim plus the FFB pipeline math (ApplyFfbFromPhysics)
+    // and the handshake routine, both of which are vendor-neutral.
+    // ========================================================================
+
     bool Init()
     {
-        log::Info("[gwheel] wheel::Init (Logitech SDK) - SDK init is deferred to the pump thread");
-        // We do NOT call LogiSteeringInitialize here. At plugin-load time the
-        // game window does not exist yet and init can fail. TryInitSdk() runs
-        // from the pump thread and retries until it succeeds.
-        return true;
+        if (g_backend) return true;
+        // Factory picks the highest-priority backend whose applicability
+        // gate passes and whose Init succeeds. See wheel_backend.cpp for
+        // the candidate table and priority order.
+        g_backend = wheel_backend::CreateActive();
+        return g_backend != nullptr;
     }
 
     void Shutdown()
     {
-        auto& st = S();
-        st.ready.store(false, std::memory_order_release);
-        if (st.sdkInitialized.exchange(false))
+        log::Info("[gwheel] wheel::Shutdown");
+        if (g_backend)
         {
-            const int idx = st.index.load(std::memory_order_acquire);
-            if (idx >= 0)
-            {
-                // Always stop any forces we might have kicked off so the
-                // wheel doesn't keep pulling after the game window closes.
-                LogiStopSpringForce(idx);
-                LogiStopDamperForce(idx);
-                LogiStopConstantForce(idx);
-                LogiStopSurfaceEffect(idx);
-                LogiStopCarAirborne(idx);
-                // Bar dark on the way out so the LEDs don't latch at
-                // their last value through the shutdown window.
-                LogiPlayLeds(idx, 0.f, 100.f, 200.f);
-
-                // Operating range is G HUB's to manage; we don't touch it
-                // on shutdown. G HUB will keep enforcing whatever its
-                // profile says.
-            }
-
-            // Deliberately NOT calling LogiSteeringShutdown(). The official
-            // LogitechSteeringWheelEnginesWrapper.dll (SDK 8.75.30, the
-            // build we ship in vendor/LogitechSDK) was compiled
-            // in DEBUG mode against MSVCR120D and is documented across the
-            // Unity / Unreal sim-racing communities to crash inside its
-            // own teardown when called at process exit. Logitech has not
-            // shipped a release-mode build. We've already stopped every
-            // force above; SDK state is reclaimed by the OS when the game
-            // process exits a fraction of a second later.
-            log::Info("[gwheel] LogiSteeringShutdown skipped (known SDK debug-DLL crash on teardown; OS reclaims state on process exit)");
+            g_backend->Close();
+            g_backend.reset();
         }
-        st.index.store(-1, std::memory_order_release);
         log::Info("[gwheel] wheel::Shutdown complete");
     }
 
-    bool IsReady() { return S().ready.load(std::memory_order_acquire); }
+    bool IsReady()
+    {
+        return g_backend && g_backend->IsOpen();
+    }
 
     const Caps& GetCaps()
     {
-        auto& st = S();
-        std::lock_guard lk(st.capsMtx);
-        static thread_local Caps tl;
-        tl = st.caps;
+        static thread_local Caps tl{};
+        if (!g_backend) { tl = Caps{}; return tl; }
+        const auto& info = g_backend->GetDeviceInfo();
+        const auto& caps = g_backend->GetCapabilities();
+        Caps c{};
+        c.vid               = info.vid;
+        c.pid               = info.pid;
+        std::memcpy(c.productName, info.productName, sizeof(c.productName));
+        c.hasFFB            = caps.ffbConstant;
+        c.operatingRangeDeg = info.operatingRangeDeg;
+        c.sdkMajor          = info.sdkMajor;
+        c.sdkMinor          = info.sdkMinor;
+        c.sdkBuild          = info.sdkBuild;
+        tl = c;
         return tl;
     }
 
     void Pump()
     {
-        auto& st = S();
+        if (!g_backend) return;
 
-        if (!st.sdkInitialized.load(std::memory_order_acquire))
+        const bool wasOpen = g_backend->IsOpen();
+        g_backend->Pump();
+        const bool nowOpen = g_backend->IsOpen();
+
+        // Edge-trigger: wheel just became ready -> fire the handshake on
+        // a detached thread (vendor-neutral; uses backend primitives).
+        if (!wasOpen && nowOpen && g_backend->HasFFB())
         {
-            if (!TryInitSdk()) return;
+            if (config::Current().handshake.playOnStart)
+                FireGwheelHandshake();
+            else
+                log::Info("[gwheel] gwheel handshake disabled by config (handshake.playOnStart=false)");
         }
 
-        LogiUpdate();
-
-        if (!st.ready.load(std::memory_order_acquire))
+        // Pause / unmount watchdog. ApplyFfbFromPhysics heartbeats each time
+        // the vehicle detour fires. When the game pauses, the detour stops
+        // firing — but already-playing effects keep running until something
+        // stops them. If no heartbeat in 200 ms, tear everything down.
+        // Re-arms automatically when the detour fires again.
+        const uint64_t last = centering_state::s_lastCallTickMs.load(std::memory_order_acquire);
+        static std::atomic<bool> s_gracefullyTornDown{false};
+        if (last > 0)
         {
-            if (!TryBindController()) return;
-        }
-
-        const int idx = st.index.load(std::memory_order_acquire);
-        if (idx < 0) return;
-
-        if (!LogiIsConnected(idx))
-        {
-            if (st.ready.exchange(false))
-                log::Warn("[gwheel] wheel disconnected; will re-bind when it returns");
-            return;
-        }
-
-        RefreshGHubRange(idx);
-
-        // Pause / unmount watchdog. UpdateCenteringSpring heartbeats each
-        // time the vehicle detour fires. When the game pauses, the detour
-        // stops firing — but already-playing effects (spring, road surface,
-        // etc.) keep running until something stops them. If no heartbeat
-        // in 200 ms, tear everything down. Re-arms automatically when the
-        // detour fires again.
-        {
-            const uint64_t last = centering_state::s_lastCallTickMs.load(std::memory_order_acquire);
-            static std::atomic<bool> s_gracefullyTornDown{false};
-            if (last > 0)
+            const uint64_t now = GetTickCount64();
+            const bool stale  = (now - last) > 200;
+            const bool wasTD  = s_gracefullyTornDown.load(std::memory_order_acquire);
+            if (stale && !wasTD)
             {
-                const uint64_t now = GetTickCount64();
-                const bool stale  = (now - last) > 200;
-                const bool wasTD  = s_gracefullyTornDown.load(std::memory_order_acquire);
-                if (stale && !wasTD)
-                {
-                    StopAll();
-                    centering_state::Reset();
-                    s_gracefullyTornDown.store(true, std::memory_order_release);
-                    log::Info("[gwheel] FFB effects released (gameplay halted — pause / unmount)");
-                }
-                else if (!stale && wasTD)
-                {
-                    s_gracefullyTornDown.store(false, std::memory_order_release);
-                    log::Info("[gwheel] FFB effects re-arming (gameplay resumed)");
-                }
+                StopAll();
+                centering_state::Reset();
+                wheel_tf::Reset();
+                s_gracefullyTornDown.store(true, std::memory_order_release);
+                log::Info("[gwheel] FFB effects released (gameplay halted — pause / unmount)");
             }
-        }
-
-        const DIJOYSTATE2* raw = LogiGetState(idx);
-        if (!raw) return;
-
-        Snapshot s;
-        s.connected = true;
-
-        // Publish all eight DInput axes by index. Steer axis (lX) keeps
-        // its -1..+1 sign; every other axis is normalized as a pedal
-        // (0..1, idle->full press). The user's action bindings select
-        // which axis drives steer / throttle / brake at runtime.
-        s.axes[Axis_lX]      = NormalizeSteer(raw->lX);
-        s.axes[Axis_lY]      = NormalizePedal(raw->lY);
-        s.axes[Axis_lZ]      = NormalizePedal(raw->lZ);
-        s.axes[Axis_lRx]     = NormalizePedal(raw->lRx);
-        s.axes[Axis_lRy]     = NormalizePedal(raw->lRy);
-        s.axes[Axis_lRz]     = NormalizePedal(raw->lRz);
-        s.axes[Axis_slider0] = NormalizePedal(raw->rglSlider[0]);
-        s.axes[Axis_slider1] = NormalizePedal(raw->rglSlider[1]);
-
-        s.pov       = static_cast<uint16_t>(raw->rgdwPOV[0] & 0xFFFF);
-
-        uint32_t bits = 0;
-        for (int i = 0; i < 32; ++i)
-            if (raw->rgbButtons[i] & 0x80) bits |= (1u << i);
-        s.buttons = bits;
-
-        {
-            std::lock_guard lk(st.snapMtx);
-            st.snap = s;
+            else if (!stale && wasTD)
+            {
+                s_gracefullyTornDown.store(false, std::memory_order_release);
+                log::Info("[gwheel] FFB effects re-arming (gameplay resumed)");
+            }
         }
     }
 
     Snapshot CurrentSnapshot()
     {
-        auto& st = S();
-        std::lock_guard lk(st.snapMtx);
-        return st.snap;
+        if (!g_backend) return Snapshot{};
+        return g_backend->CurrentSnapshot();
     }
 
-    namespace
-    {
-        int Scale100(float v)
-        {
-            const float mul = std::clamp(S().globalStrength.load(std::memory_order_relaxed), 0.f, 1.f);
-            return std::clamp(static_cast<int>(std::lround(std::clamp(v * mul, -1.f, 1.f) * 100.f)),
-                              -100, 100);
-        }
+    // ---- FFB primitives: thin delegations to the active backend -----------
 
-        int ScaleUnsigned100(float v)
-        {
-            const float mul = std::clamp(S().globalStrength.load(std::memory_order_relaxed), 0.f, 1.f);
-            return std::clamp(static_cast<int>(std::lround(std::clamp(v * mul, 0.f, 1.f) * 100.f)),
-                              0, 100);
-        }
-    }
-
-    void PlayConstant(float magnitude)
-    {
-        auto& st = S();
-        if (!st.ready.load() || !st.hasFFB.load()) return;
-        const int idx = st.index.load(std::memory_order_acquire);
-        const int pct = Scale100(magnitude);
-        if (!LogiPlayConstantForce(idx, pct))
-            log::DebugF("[gwheel] LogiPlayConstantForce(%d) returned false", pct);
-        else if (log::DebugEnabled())
-            log::DebugF("[gwheel] constant=%d%%", pct);
-    }
-
-    void StopConstant()
-    {
-        auto& st = S();
-        const int idx = st.index.load(std::memory_order_acquire);
-        if (idx >= 0) LogiStopConstantForce(idx);
-    }
-
-    void PlayDamper(float coefficient)
-    {
-        auto& st = S();
-        if (!st.ready.load() || !st.hasFFB.load()) return;
-        const int idx = st.index.load(std::memory_order_acquire);
-        const int pct = ScaleUnsigned100(coefficient);
-        if (!LogiPlayDamperForce(idx, pct))
-            log::DebugF("[gwheel] LogiPlayDamperForce(%d) returned false", pct);
-        else if (log::DebugEnabled())
-            log::DebugF("[gwheel] damper=%d%%", pct);
-    }
-
-    void StopDamper()
-    {
-        auto& st = S();
-        const int idx = st.index.load(std::memory_order_acquire);
-        if (idx >= 0) LogiStopDamperForce(idx);
-    }
-
-    void PlaySpring(float coefficient)
-    {
-        auto& st = S();
-        if (!st.ready.load() || !st.hasFFB.load()) return;
-        const int idx = st.index.load(std::memory_order_acquire);
-        const int pct = ScaleUnsigned100(coefficient);
-        // offset=0 (centered), saturation=100, coefficient=pct.
-        if (!LogiPlaySpringForce(idx, 0, 100, pct))
-            log::DebugF("[gwheel] LogiPlaySpringForce(coef=%d) returned false", pct);
-        else if (log::DebugEnabled())
-            log::DebugF("[gwheel] spring=%d%%", pct);
-    }
-
-    void StopSpring()
-    {
-        auto& st = S();
-        const int idx = st.index.load(std::memory_order_acquire);
-        if (idx >= 0) LogiStopSpringForce(idx);
-    }
-
-    void SetGlobalStrength(float mul)
-    {
-        S().globalStrength.store(std::clamp(mul, 0.f, 1.f), std::memory_order_relaxed);
-    }
+    void PlayConstant(float magnitude) { if (g_backend) g_backend->PlayConstant(magnitude); }
+    void StopConstant()                 { if (g_backend) g_backend->StopConstant(); }
+    void PlayDamper(float coefficient)  { if (g_backend) g_backend->PlayDamper(coefficient); }
+    void StopDamper()                   { if (g_backend) g_backend->StopDamper(); }
+    void PlaySpring(float coefficient)  { if (g_backend) g_backend->PlaySpring(coefficient); }
+    void StopSpring()                   { if (g_backend) g_backend->StopSpring(); }
+    void SetGlobalStrength(float mul)   { if (g_backend) g_backend->SetGlobalGain(mul); }
 
     void PlayRoadSurface(float magnitude, int periodMs)
     {
-        auto& st = S();
-        if (!st.ready.load() || !st.hasFFB.load()) return;
-        const int idx = st.index.load(std::memory_order_acquire);
-        const int pct = ScaleUnsigned100(magnitude);
-        if (!LogiPlaySurfaceEffect(idx, LOGI_PERIODICTYPE_SINE, pct, periodMs))
-            log::DebugF("[gwheel] LogiPlaySurfaceEffect(SINE, %d, %dms) returned false", pct, periodMs);
-        else if (log::DebugEnabled())
-            log::DebugF("[gwheel] surface=%d%% @ %dms", pct, periodMs);
+        if (g_backend) g_backend->PlayPeriodic(magnitude, periodMs);
     }
+    void StopRoadSurface()              { if (g_backend) g_backend->StopPeriodic(); }
+    void PlayCarAirborne()              { if (g_backend) g_backend->SetAirborne(true); }
+    void StopCarAirborne()              { if (g_backend) g_backend->SetAirborne(false); }
+    void StopAll()                      { if (g_backend) g_backend->StopAll(); }
 
-    void StopRoadSurface()
-    {
-        auto& st = S();
-        const int idx = st.index.load(std::memory_order_acquire);
-        if (idx >= 0) LogiStopSurfaceEffect(idx);
-    }
-
-    void PlayCarAirborne()
-    {
-        auto& st = S();
-        if (!st.ready.load() || !st.hasFFB.load()) return;
-        const int idx = st.index.load(std::memory_order_acquire);
-        if (!LogiPlayCarAirborne(idx))
-            log::Debug("[gwheel] LogiPlayCarAirborne returned false");
-        else if (log::DebugEnabled())
-            log::Debug("[gwheel] airborne ON");
-    }
-
-    void StopCarAirborne()
-    {
-        auto& st = S();
-        const int idx = st.index.load(std::memory_order_acquire);
-        if (idx >= 0) LogiStopCarAirborne(idx);
-    }
-
-    void StopAll()
-    {
-        auto& st = S();
-        const int idx = st.index.load(std::memory_order_acquire);
-        if (idx < 0) return;
-        LogiStopConstantForce(idx);
-        LogiStopDamperForce(idx);
-        LogiStopSpringForce(idx);
-        LogiStopSurfaceEffect(idx);
-        LogiStopCarAirborne(idx);
-    }
-
-    void PlayLeds(float level)
-    {
-        auto& st = S();
-        if (!st.ready.load()) return;
-        const int idx = st.index.load(std::memory_order_acquire);
-        if (idx < 0) return;
-        WriteLeds(idx, level);
-    }
-
+    void PlayLeds(float level)          { if (g_backend) g_backend->SetLedLevel(level); }
     void PlayLedsRaw(float currentRpm, float firstLedRpm, float shiftRpm)
     {
-        auto& st = S();
-        if (!st.ready.load()) return;
-        const int idx = st.index.load(std::memory_order_acquire);
-        if (idx < 0) return;
-        // Degenerate profile (shiftRpm <= firstLedRpm or both zero) means
-        // the redscript push hasn't landed yet; fall through to the
-        // dark-bar branch of WriteLeds rather than feeding LogiPlayLeds
-        // a zero-width window which the firmware interprets unpredictably.
-        if (!(shiftRpm > firstLedRpm) || shiftRpm <= 0.f)
-        {
-            WriteLeds(idx, 0.f);
-            return;
-        }
-        if (currentRpm < firstLedRpm)
-        {
-            // Below the first-LED threshold the SDK leaves the bar dark.
-            // Route through WriteLeds' explicit-dark form to dodge the
-            // G923 idle-indicator quirk.
-            WriteLeds(idx, 0.f);
-            return;
-        }
-        LogiPlayLeds(idx, currentRpm, firstLedRpm, shiftRpm);
+        if (g_backend) g_backend->PlayLeds(currentRpm, firstLedRpm, shiftRpm);
     }
-
-    void ClearLeds()
-    {
-        auto& st = S();
-        if (!st.ready.load()) return;
-        const int idx = st.index.load(std::memory_order_acquire);
-        if (idx < 0) return;
-        WriteLeds(idx, 0.f);
-    }
+    void ClearLeds()                    { if (g_backend) g_backend->ClearLeds(); }
 
     bool IsHandshakeActive()
     {
-        return S().handshakeActive.load(std::memory_order_acquire);
+        return g_handshakeActive.load(std::memory_order_acquire);
+    }
+
+    // Accessor used by wheel_tf_pipeline.cpp so it can feed TF samples
+    // through the active backend without owning its own handle. Returns
+    // nullptr when no backend is bound.
+    wheel_backend::IWheelBackend* GetActiveBackend()
+    {
+        return g_backend.get();
     }
 
     // Surface-driven baseline magnitude for the road-surface SINE.
@@ -1054,7 +504,7 @@ namespace gwheel::wheel
         // anchored on 180-deg = 1.0. Range is read live from G HUB (cached
         // by the pump thread, ~1s latency on profile changes). Clamped to
         // avoid zero and absurd boosts at tight ranges.
-        const int ghubRange = std::clamp(s_ghubRangeDeg.load(std::memory_order_acquire),
+        const int ghubRange = std::clamp(g_backend ? g_backend->GetOperatingRangeDeg() : 540,
                                          40, 1080);
         const float rangeScale = std::clamp(180.f / static_cast<float>(ghubRange),
                                             0.3f, 1.5f);
@@ -1080,8 +530,7 @@ namespace gwheel::wheel
                        enabled ? 1 : 0, isOnGround ? 1 : 0,
                        (absSpeedMps > stationaryMps) ? 1 : 0);
 
-        auto& st = S();
-        if (!st.ready.load() || !st.hasFFB.load())
+        if (!IsReady() || !g_backend->HasFFB())
         {
             if (breadcrumb)
                 log::Debug("[gwheel:ffb-bisect] early-return: !ready or !hasFFB");
@@ -1548,6 +997,27 @@ namespace gwheel::wheel
         }
         if (bcMove)
             log::Debug("[gwheel:ffb-bisect] active body RETURN");
+
+        // ---- TF (vibrotactile) channel feed ------------------------------
+        // Synthesises a single sample per tick from RPM + suspension envelope
+        // + skid intensity + driver state. No-op unless the active backend
+        // declares caps.vibrotactile AND config.trueForce.feedSignals is on.
+        // Vendor-neutral: legacy backend's caps.vibrotactile=false short-
+        // circuits the call inside Feed().
+        {
+            wheel_tf::Inputs tfIn;
+            const float redline = sources::RedlineRpm();
+            tfIn.rpmNorm         = (redline > 1.f)
+                                     ? std::clamp(sources::EngineRpmRaw() / redline, 0.f, 1.f)
+                                     : 0.f;
+            tfIn.throttle        = std::clamp(throttle, 0.f, 1.f);
+            tfIn.surfaceEnvelope = std::clamp(env, 0.f, 1.f);
+            tfIn.skidNorm        = std::clamp(slipNorm, 0.f, 1.f);
+            tfIn.isOnGround      = isOnGround;
+            tfIn.isMoving        = (absSpeedMps > stationaryMps);
+            tfIn.isReversing     = isReversing;
+            wheel_tf::Feed(tfIn);
+        }
 
         static std::atomic<uint64_t> s_sampleTicks{0};
         const uint64_t sampleN = s_sampleTicks.fetch_add(1, std::memory_order_relaxed) + 1;

@@ -11,6 +11,7 @@
 #include "audio_monitor.h"
 #include "led.h"
 #include "mod_settings_seed.h"
+#include "trueforce_loader.h"
 
 #include <atomic>
 #include <chrono>
@@ -75,35 +76,42 @@ namespace gwheel
         log::InfoF("[gwheel] loaded v%s", kVersionString);
         log::InfoF("[gwheel] ========================================");
 
-        log::Info("[gwheel] step 1/9: loading config");
+        log::Info("[gwheel] step 1/10: loading config");
         config::Load();
 
         // MUST run before mod_settings reads its user.ini in ProcessScriptData.
         // All RED4ext plugin OnLoads complete before script processing begins,
         // so this ordering is safe regardless of plugin load order.
-        log::Info("[gwheel] step 2/9: probing attached wheel + seeding mod_settings/user.ini");
+        log::Info("[gwheel] step 2/10: probing attached wheel + seeding mod_settings/user.ini");
         mod_settings_seed::Run();
 
-        log::Info("[gwheel] step 3/9: registering redscript natives");
+        log::Info("[gwheel] step 3/10: registering redscript natives");
         rtti::Register();
 
-        log::Info("[gwheel] step 4/9: initializing Logitech SDK wheel layer (deferred)");
+        // TrueForce loader MUST run before wheel::Init so the backend
+        // factory's TrueForceApplicable() predicate sees IsActive()==true
+        // when the user has opted in. Otherwise the factory always falls
+        // through to LegacyBackend regardless of trueForce.enabled.
+        log::Info("[gwheel] step 4/10: probing G HUB for TrueForce runtime");
+        trueforce::Initialize();
+
+        log::Info("[gwheel] step 5/10: selecting wheel backend + initializing");
         wheel::Init();
 
-        log::Info("[gwheel] step 5/9: installing vehicle-input detour (hash-resolved)");
+        log::Info("[gwheel] step 6/10: installing vehicle-input detour (hash-resolved)");
         vehicle_hook::Init();
 
-        log::Info("[gwheel] step 6/9: installing on-foot keyboard hook (G HUB injection filter)");
+        log::Info("[gwheel] step 7/10: installing on-foot keyboard hook (G HUB injection filter)");
         kbd_hook::Install();
 
-        log::Info("[gwheel] step 7/9: starting 250 Hz pump thread");
+        log::Info("[gwheel] step 8/10: starting 250 Hz pump thread");
         g_pumpRunning.store(true, std::memory_order_release);
         g_pumpThread = std::thread(PumpLoop);
 
-        log::Info("[gwheel] step 8/9: starting WASAPI loopback audio monitor");
+        log::Info("[gwheel] step 9/10: starting WASAPI loopback audio monitor");
         audio_monitor::Init();
 
-        log::Info("[gwheel] step 9/9: starting rev-strip LED controller");
+        log::Info("[gwheel] step 10/10: starting rev-strip LED controller");
         led::Init();
 
         log::InfoF("[gwheel] ready: hook=%s kbdhook=%s",
@@ -143,6 +151,7 @@ namespace gwheel
         sources::SetRadioActive(false);
 
         kbd_hook::Uninstall();
+        trueforce::Shutdown();
         wheel::Shutdown();
 
         auto& ctx = Ctx();
