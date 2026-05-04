@@ -173,6 +173,18 @@ namespace gwheel::axis_resolver
         {
             // Steer-only filtering. Pedals skip this — they're 0..1 and
             // don't suffer from a center offset.
+            //
+            // We deliberately do NOT scale the steer axis by the G HUB
+            // operating range. The DInput lX axis already maps full
+            // physical rotation to ±1 across whatever range G HUB has
+            // configured: at G HUB=180 the wheel hits axis=±1 at ±90°
+            // physical, at G HUB=900 it hits ±1 at ±450° physical. The
+            // game's in-game wheel is then driven from that ±1 axis,
+            // so wider G HUB ranges naturally translate into more rim
+            // travel for the same in-game lock — which is what the
+            // user wants. FFB feel changes with range (the rangeScale
+            // factor in ApplyFfbFromPhysics handles this) but
+            // steering ratio stays "G HUB range = full lock".
             const auto cfg = config::Current();
             result = ShapeSignedSteer(result, cfg.input.steerDeadzonePct, cfg.input.responseCurve);
         }

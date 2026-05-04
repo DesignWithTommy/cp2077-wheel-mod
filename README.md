@@ -1,6 +1,6 @@
 # Cyberpunk 2077 — Logitech G-series Steering Wheel Mod
 
-**v2.31.1** for Cyberpunk 2077 game patch 2.31.
+**v2.31.2** for Cyberpunk 2077 game patch 2.31.
 
 Drive Cyberpunk 2077 with a Logitech G-series steering wheel. Your wheel handles steering, throttle, and brake. Force feedback fires from in-game physics (centering as you turn, cornering load, surface texture, collision jolts, slip when you lose grip). Rev-strip LEDs follow real engine RPM. When the in-car radio is on, the rev strip becomes a music visualizer.
 
@@ -92,6 +92,7 @@ Hardware-capability sections auto-hide on wheels without the relevant components
 - **Doubled keypresses on a wheel button.** G HUB and this mod are both binding the same key. Either clear the entry from your G HUB Cyberpunk profile, or unbind that action here.
 - **Wheel rolls *away* from center instead of recovering, or fights you back into the turn under load.** Open Mod Settings → G-series Wheel → Force feedback and enable **Invert FFB direction**. This is a known Logitech-wide issue (G29/G920/G923/G27/G25/Driving Force/Momo) where some unit/firmware/G HUB combinations interpret the SDK's constant-force direction opposite to what's documented. Forza, iRacing, and most other sim titles expose the same toggle.
 - **Wheel feels too stiff or too floppy at speed.** **Speed-sensitive stiffness** in Force feedback settings controls this. On (default): wheel firms up at speed (sportscar-style steering assist). Off: pure tire-force feedback only, like BeamNG. The wheel goes light at rest and feels more raw at speed.
+- **Operating-range slider in G HUB doesn't change anything in-game** (FFB feels the same regardless of what you set the range to, or the in-game wheel doesn't track physical rotation). G HUB's IPC layer can get into a stuck state where the value the slider shows isn't what's actually being reported to applications. Reinstall G HUB to clear it. The mod's `red4ext/logs/gwheel-*.log` will show `range readback at bind: SDK=N G HUB properties=M` — if those two values disagree, or either reads `FAILED`, that's confirming the bad-G-HUB diagnosis.
 
 ## Credits
 

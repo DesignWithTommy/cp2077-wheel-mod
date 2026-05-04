@@ -97,14 +97,18 @@ namespace gwheel::wheel
         State& S() { static State s; return s; }
 
         // G HUB owns the operating range per-profile. The mod honors it:
-        // once per second we read the SDK's current range and cache it
-        // into s_ghubRangeDeg, which UpdateCenteringSpring consults to
-        // scale FFB magnitude inversely with wheel rotation (so a 900-deg
-        // wheel isn't weighed down by SAT meant for a tight 180).
+        // once per second we re-read G HUB's live profile range (via
+        // LogiGetCurrentControllerProperties — see CaptureCaps for why
+        // not LogiGetOperatingRange) and cache it into s_ghubRangeDeg,
+        // which ApplyFfbFromPhysics consults to scale FFB magnitude
+        // inversely with wheel rotation (so a 900-deg wheel isn't
+        // weighed down by SAT meant for a tight 180).
         //
-        // Default starting value is a safe 540 — most G HUB profiles land
-        // in this range, and the value gets overwritten with the real
-        // reading at bind time plus refreshed every second thereafter.
+        // Default starting value is a safe 540 — most G HUB profiles
+        // land in this range, and the value gets overwritten with the
+        // real reading at bind time plus refreshed every second
+        // thereafter. Slider drags in G HUB during gameplay propagate
+        // within ~1 second.
         std::atomic<int> s_ghubRangeDeg{540};
 
         // Pick the first LOGI_DEVICE_TYPE_WHEEL index that reports connected.
@@ -198,8 +202,40 @@ namespace gwheel::wheel
 
             c.hasFFB = LogiHasForceFeedback(idx);
 
-            int range = 0;
-            if (LogiGetOperatingRange(idx, range)) c.operatingRangeDeg = range;
+            // Diagnostic at bind: log both range-readback APIs side-by-
+            // side so any divergence is visible. On a healthy G HUB
+            // install both should return the same value; if they
+            // disagree (or one returns FAILED) that's a strong signal
+            // of a corrupt G HUB IPC layer and the user should
+            // reinstall G HUB before suspecting the mod.
+            //
+            //   LogiGetOperatingRange
+            //     Returns the SDK's operating-range value. This is
+            //     what we use at runtime for FFB scaling — simpler
+            //     call, no extra IPC handshake.
+            //
+            //   LogiGetCurrentControllerProperties().wheelRange
+            //     Queries G HUB for the live profile properties.
+            //     Logged for diagnostic purposes only.
+            int rangeOp = 0;
+            const bool gotOp = LogiGetOperatingRange(idx, rangeOp);
+
+            LogiControllerPropertiesData props{};
+            const bool gotProps = LogiGetCurrentControllerProperties(idx, props);
+            const int rangeProps = gotProps ? props.wheelRange : 0;
+
+            if (gotOp && rangeOp > 0)
+                c.operatingRangeDeg = rangeOp;
+            else if (gotProps && rangeProps > 0)
+                c.operatingRangeDeg = rangeProps;
+
+            char propsBuf[16] = "FAILED";
+            char opBuf[16]    = "FAILED";
+            if (gotProps) std::snprintf(propsBuf, sizeof(propsBuf), "%d", rangeProps);
+            if (gotOp)    std::snprintf(opBuf,    sizeof(opBuf),    "%d", rangeOp);
+            log::InfoF("[gwheel] range readback at bind: SDK=%s G HUB properties=%s "
+                       "(divergence or FAILED on either side suggests a corrupt G HUB install)",
+                       opBuf, propsBuf);
 
             // Best-effort model probe against the constants this SDK version
             // actually ships (header tops out at G920; newer wheels report via
@@ -442,9 +478,20 @@ namespace gwheel::wheel
         // the driver level. The per-effect multiplier is reliable and
         // composes correctly with G HUB's own TRUEFORCE Torque slider.
 
+        // FFB-scale-from-range matches the formula in ApplyFfbFromPhysics
+        // (anchor 180 deg = 1.0, clamp 0.3..1.5). Kept here so the range-
+        // change log line shows the actual scale the user is now feeling.
+        float RangeToFfbScale(int rangeDeg)
+        {
+            const int clamped = std::clamp(rangeDeg, 40, 1080);
+            return std::clamp(180.f / static_cast<float>(clamped), 0.3f, 1.5f);
+        }
+
         void RefreshGHubRange(int idx)
         {
-            // Pump runs at ~250 Hz; sample every 1s (≈250 ticks).
+            // Pump runs at ~250 Hz; sample every 1s (≈250 ticks). 1s of
+            // latency is invisible to the user dragging the G HUB slider
+            // and keeps SDK chatter low.
             static uint64_t s_pumpTicks = 0;
             if ((++s_pumpTicks % 250) != 0) return;
 
@@ -454,8 +501,11 @@ namespace gwheel::wheel
             const int prev = s_ghubRangeDeg.exchange(actual, std::memory_order_acq_rel);
             if (prev != actual)
             {
-                log::InfoF("[gwheel] operating range (G HUB): %d -> %d deg (FFB auto-scaling to match)",
-                           prev, actual);
+                log::InfoF("[gwheel] operating range (G HUB): %d -> %d deg "
+                           "(FFB scale: %.2f -> %.2f)",
+                           prev, actual,
+                           RangeToFfbScale(prev),
+                           RangeToFfbScale(actual));
             }
         }
     }
@@ -1001,14 +1051,28 @@ namespace gwheel::wheel
         // Operating-range compensation. A 900-deg wheel turns 5x further
         // than a 180-deg wheel for the same SAT output, so the per-degree
         // force feels overwhelming. Scale all FFB inversely with range,
-        // anchored on 180-deg = 1.0. Range is read from G HUB (cached by
-        // the pump thread); if the user changes profiles mid-session we
-        // pick it up within a second. Clamped to avoid zero and absurd
-        // boosts at tight ranges.
+        // anchored on 180-deg = 1.0. Range is read live from G HUB (cached
+        // by the pump thread, ~1s latency on profile changes). Clamped to
+        // avoid zero and absurd boosts at tight ranges.
         const int ghubRange = std::clamp(s_ghubRangeDeg.load(std::memory_order_acquire),
-                                         40, 900);
+                                         40, 1080);
         const float rangeScale = std::clamp(180.f / static_cast<float>(ghubRange),
                                             0.3f, 1.5f);
+
+        // Edge-triggered info log: emit one line each time the active
+        // scale moves to a new bucket so the log shows what the wheel
+        // is actually being driven with at this moment, without spamming
+        // the file every tick.
+        {
+            static std::atomic<int> s_lastScaleX100{-1};
+            const int bucket = static_cast<int>(std::lround(rangeScale * 100.f));
+            const int prev = s_lastScaleX100.exchange(bucket, std::memory_order_acq_rel);
+            if (prev != bucket)
+            {
+                log::InfoF("[gwheel] FFB range-scale active: %.2f (range=%d deg)",
+                           rangeScale, ghubRange);
+            }
+        }
 
         if (breadcrumb)
             log::DebugF("[gwheel:ffb-bisect] derived: cruise=%.2f base=%.3f yawRef=%.3f range=%d enabled=%d isOnGround=%d moving=%d",

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.31.2 — 2026-05-03
+
+### Logging
+
+- Both Logitech range-readback APIs are now logged side-by-side at bind time so a corrupt G HUB IPC layer is visible at a glance: `range readback at bind: SDK=N G HUB properties=M (divergence or FAILED on either side suggests a corrupt G HUB install)`.
+- Range changes log the resulting FFB scale: `operating range (G HUB): 360 -> 180 deg (FFB scale: 0.50 -> 1.00)`.
+- The active rangeScale logs once each time it crosses to a new bucket: `FFB range-scale active: 1.00 (range=180 deg)`. No per-frame spam.
+- Toggling debug logging in Mod Settings emits an info-level confirmation so users can verify in the log file that the checkbox actually propagated.
+
+### Documentation
+
+- Troubleshooting now covers the "G HUB operating-range slider doesn't seem to affect anything" symptom and how to confirm it from the log file.
+
 ## 2.31.1 — 2026-05-03
 
 ### Bindings UX

@@ -1,13 +1,13 @@
 # Nexus Upload Cheatsheet
 
-Reference for filling out the Nexus mod-upload form for v2.31.1. Settings on this page are entered through the Nexus UI when you create / edit the mod page; they are not part of the zip.
+Reference for filling out the Nexus mod-upload form for v2.31.2. Settings on this page are entered through the Nexus UI when you create / edit the mod page; they are not part of the zip.
 
 ## Page metadata
 
 | Field | Value |
 | --- | --- |
 | **Mod Name** | `Logitech G-series Steering Wheel` |
-| **Version** | `2.31.1` |
+| **Version** | `2.31.2` |
 | **Game** | Cyberpunk 2077 |
 | **Category** | Vehicles (or Gameplay if Vehicles isn't accepted; this mod doesn't fit Modders Resources) |
 | **Author** | Grant Perdue |
@@ -78,15 +78,15 @@ In the **Credits** section, list:
 Upload the FOMOD zip:
 
 ```
-dist/gwheel-2.31.1.zip
+dist/gwheel-2.31.2.zip
 ```
 
 In the file's metadata:
 
 - **File name**: `Logitech G-series Wheel Mod`
-- **File version**: `2.31.1`
+- **File version**: `2.31.2`
 - **Category**: `Main Files`
-- **Description**: `Full mod, FOMOD installer. v2.31.1 for game patch 2.31.`
+- **Description**: `Full mod, FOMOD installer. v2.31.2 for game patch 2.31.`
 
 ## Images (need at least one)
 
@@ -122,6 +122,13 @@ TROUBLESHOOTING TIPS — read before reporting an issue:
    (most recent file). Without those four pieces of info I cannot help.
 
 5. Non-Logitech wheels (Thrustmaster, Fanatec, Moza) are not supported.
+
+6. If the G HUB operating-range slider doesn't seem to affect anything in-game
+   (FFB doesn't change with range, in-game wheel doesn't track physical rotation),
+   reinstall G HUB. Its IPC can get stuck in a state where the value the slider
+   shows isn't what's reported to applications. The mod's gwheel-*.log will show
+   "range readback at bind: SDK=N G HUB properties=M" — if those disagree or
+   either reads FAILED, that confirms the bad-G-HUB diagnosis.
 ```
 
 ## Changelog tab

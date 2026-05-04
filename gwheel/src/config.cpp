@@ -318,7 +318,24 @@ namespace gwheel::config
         void ApplyDerived(const Config& c)
         {
             // Anything that must take effect immediately when config changes.
+            //
+            // Edge-triggered info log on the debug-logging toggle so the
+            // user can confirm in the log file that the Mod Settings
+            // checkbox actually propagated. Without this, a user
+            // diagnosing a "debug logs aren't working" issue has no way
+            // to tell whether the flag flipped or not — the absence of
+            // debug lines could mean either "toggle didn't apply" or
+            // "no debug paths fired".
+            static std::atomic<int> s_lastDebugFlag{-1}; // -1 = first call
+            const int newFlag = c.ffb.debugLogging ? 1 : 0;
+            const int prev = s_lastDebugFlag.exchange(newFlag, std::memory_order_acq_rel);
             log::SetDebugEnabled(c.ffb.debugLogging);
+            if (prev != newFlag)
+            {
+                log::InfoF("[gwheel] debug logging %s",
+                           c.ffb.debugLogging ? "ENABLED" : "disabled");
+            }
+
             wheel::SetGlobalStrength(std::clamp(c.ffb.torquePct, 0, 100) / 100.f);
 
             // Mirror the persisted action bindings into both runtime
