@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -26,9 +27,26 @@ namespace gwheel::audio_monitor
 {
     namespace
     {
-        std::atomic<bool>  g_running{false};
-        std::atomic<float> g_level{0.f};
-        std::thread        g_thread;
+        std::atomic<bool>   g_running{false};
+        std::atomic<float>  g_level{0.f};
+        std::thread         g_thread;
+
+        // Per-hook record. The instanceId is the LPWSTR returned by
+        // IAudioSessionControl2::GetSessionInstanceIdentifier — a stable
+        // identifier for that logical session. We dedupe re-attach calls
+        // against this string instead of the IAudioSessionControl* pointer
+        // because the COM enumerator returns a NEW interface pointer per
+        // GetSession() call for the same logical session, which made the
+        // old pointer-based dedup never match — every 250 ms re-poll
+        // re-registered the listener and re-pushed the session, growing
+        // both the vector and the listener's per-session callback list
+        // without bound. (Repro: city driving, 30+ minutes, hitches escalate
+        // and the process eventually crashes.)
+        struct HookedSession
+        {
+            IAudioSessionControl* ctrl = nullptr;
+            std::wstring          instanceId;
+        };
 
         // Live per-app session volume scalar [0..1]. Updated instantly
         // on Game Bar / Volume Mixer changes via IAudioSessionEvents,
@@ -273,13 +291,19 @@ namespace gwheel::audio_monitor
         // single-tick latency regardless of which session the slider
         // event happens to land on.
         //
-        // Re-callable: skips sessions whose IAudioSessionControl
-        // pointer is already in outSessions (so the 1 Hz attach-retry
-        // path picks up newly-spawned sessions without double-hooking
-        // existing ones).
+        // Re-callable: dedupes by IAudioSessionControl2 instance
+        // identifier (stable LPWSTR per logical session) — NOT by
+        // IAudioSessionControl* interface pointer, which is freshly
+        // allocated on each enumeration and never matches across calls.
+        // The pointer-based dedup that lived here previously caused a
+        // per-poll re-registration leak: every 250 ms each session got
+        // pushed onto outSessions again and `listener` got appended to
+        // its internal callback list again, both growing without bound
+        // for the entire session. Diagnosed via city-driving crashes
+        // 2026-05-05.
         void AttachSessionVolumeListenersAll(DWORD targetPid,
                                              SessionVolumeListener* listener,
-                                             std::vector<IAudioSessionControl*>& outSessions)
+                                             std::vector<HookedSession>& outSessions)
         {
             IMMDeviceEnumerator*     enumerator = nullptr;
             IMMDevice*               device     = nullptr;
@@ -311,6 +335,7 @@ namespace gwheel::audio_monitor
             float bestScalar = -1.f;
             int   count      = 0;
             sessions->GetCount(&count);
+            int newAttachments = 0;
             for (int i = 0; i < count; ++i)
             {
                 IAudioSessionControl* ctrl = nullptr;
@@ -336,13 +361,38 @@ namespace gwheel::audio_monitor
                                 bestScalar = effective;
                         }
 
-                        bool already = false;
-                        for (auto* s : outSessions) { if (s == ctrl) { already = true; break; } }
-                        if (!already
-                            && SUCCEEDED(ctrl->RegisterAudioSessionNotification(listener)))
+                        // Stable per-session identifier. CoTaskMemFree the
+                        // returned LPWSTR after we've copied it into a
+                        // wstring. If the call fails (older Windows or COM
+                        // hiccup) we fall back to skipping this session
+                        // rather than risking a re-registration leak — a
+                        // single missed session just means slider events
+                        // on it bounce through the 250 ms poll safety net.
+                        LPWSTR rawId = nullptr;
+                        std::wstring instanceId;
+                        if (SUCCEEDED(ctrl2->GetSessionInstanceIdentifier(&rawId)) && rawId)
                         {
-                            outSessions.push_back(ctrl);
-                            ctrl = nullptr;  // ownership transferred
+                            instanceId = rawId;
+                            CoTaskMemFree(rawId);
+                        }
+
+                        if (!instanceId.empty())
+                        {
+                            bool already = false;
+                            for (const auto& h : outSessions)
+                            {
+                                if (h.instanceId == instanceId) { already = true; break; }
+                            }
+                            if (!already
+                                && SUCCEEDED(ctrl->RegisterAudioSessionNotification(listener)))
+                            {
+                                HookedSession h;
+                                h.ctrl       = ctrl;
+                                h.instanceId = std::move(instanceId);
+                                outSessions.push_back(std::move(h));
+                                ctrl = nullptr;  // ownership transferred
+                                ++newAttachments;
+                            }
                         }
                     }
                     ctrl2->Release();
@@ -352,6 +402,12 @@ namespace gwheel::audio_monitor
 
             if (bestScalar >= 0.f)
                 g_volumeScalar.store(bestScalar, std::memory_order_release);
+
+            if (newAttachments > 0)
+            {
+                log::InfoF("[gwheel:audio] attached %d new session-volume listener(s) (total now %zu)",
+                           newAttachments, outSessions.size());
+            }
 
             cleanup();
         }
@@ -745,8 +801,8 @@ namespace gwheel::audio_monitor
             // slider position keeps the bar pulsing on real music.
             constexpr float kMinCompensationScalar = 0.01f;
 
-            SessionVolumeListener*               listener     = nullptr;
-            std::vector<IAudioSessionControl*>   hookedSessions;
+            SessionVolumeListener*       listener = nullptr;
+            std::vector<HookedSession>   hookedSessions;
             if (perProcess && attachedPid != 0)
             {
                 listener = new SessionVolumeListener();
@@ -918,12 +974,13 @@ namespace gwheel::audio_monitor
 
             if (listener)
             {
-                for (auto* s : hookedSessions)
+                for (auto& h : hookedSessions)
                 {
-                    if (s)
+                    if (h.ctrl)
                     {
-                        s->UnregisterAudioSessionNotification(listener);
-                        s->Release();
+                        h.ctrl->UnregisterAudioSessionNotification(listener);
+                        h.ctrl->Release();
+                        h.ctrl = nullptr;
                     }
                 }
                 hookedSessions.clear();

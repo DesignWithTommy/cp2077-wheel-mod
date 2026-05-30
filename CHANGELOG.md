@@ -1,6 +1,10 @@
 # Changelog
 
-## 2.31.2 — 2026-05-03
+## 2.31.2 — 2026-05-30
+
+### Stability
+
+- Fixed an audio session re-registration leak that grew the process's memory and per-session callback list without bound. The 250 ms poll that re-attaches Game Bar / Volume Mixer listeners deduped by `IAudioSessionControl*` interface pointer, but the COM enumerator hands back a fresh pointer per `GetSession()` call for the same logical session, so the dedup never matched. Every poll re-registered the listener and re-pushed the session. Symptom on long city drives: escalating hitches, eventual crash. Now deduped by `IAudioSessionControl2::GetSessionInstanceIdentifier`, the stable per-session string.
 
 ### Logging
 
