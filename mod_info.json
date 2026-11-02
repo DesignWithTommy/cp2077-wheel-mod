@@ -2,7 +2,7 @@
   "name": "Logitech G-series Wheel Mod",
   "shortName": "direct_wheel",
   "version": "3.4.0",
-  "author": "Grant Perdue",
+  "author": "Grant Perdue (clevergrant), SERG (natpoh), DesignWithTommy",
   "description": "Cyberpunk 2077 support for Logitech G-series steering wheels via a RED4ext plugin. Respects Logitech G HUB by default.",
   "game": "Cyberpunk 2077",
   "framework": "RED4ext + redscript + Mod Settings",

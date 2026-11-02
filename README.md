@@ -170,11 +170,17 @@ r6/scripts/direct_wheel/
 
 ## Credits
 
-- Original [cp2077-wheel-mod](https://github.com/clevergrant/cp2077-wheel-mod) by clevergrant
-- Moza / direct-drive features from [cp2077-wheel-mod-moza](https://github.com/natpoh/cp2077-wheel-mod-moza) by natpoh
-- 2.5 update and fixes by DesignWithTommy
-- RED4ext SDK by [WopsS](https://github.com/WopsS/RED4ext.SDK)
-- Cyber Engine Tweaks by [yamashi / maximegmd](https://github.com/maximegmd/CyberEngineTweaks)
+- **Grant Perdue ([clevergrant](https://github.com/clevergrant))**: the original [cp2077-wheel-mod](https://github.com/clevergrant/cp2077-wheel-mod) (Logitech G-series wheel support, FFB, LEDs, Mod Settings page) and the patched Mod Settings build
+- **SERG ([natpoh](https://github.com/natpoh))**: [cp2077-wheel-mod-moza](https://github.com/natpoh/cp2077-wheel-mod-moza), Moza / direct-drive support, axis mapping, device selector, steering linearization and speed boost, Let There Be Flight bridge
+- **[DesignWithTommy](https://github.com/DesignWithTommy)**: the Cyberpunk 2077 2.5 update (3.4.0) and the burnout fix
+- [RED4ext](https://github.com/WopsS/RED4ext) and the [RED4ext SDK](https://github.com/WopsS/RED4ext.SDK) by WopsS and contributors (2.5 types)
+- [redscript](https://github.com/jac3km4/redscript) by jac3km4
+- [Mod Settings](https://github.com/jackhumbert/mod_settings) and [Let There Be Flight](https://www.nexusmods.com/cyberpunk2077/mods/5208) by jackhumbert
+- [ArchiveXL](https://github.com/psiberx/cp2077-archive-xl) by psiberx
+- [Cyber Engine Tweaks](https://github.com/maximegmd/CyberEngineTweaks) by yamashi / maximegmd
+- Logitech Steering Wheel SDK by Logitech
+- [NativeDB](https://nativedb.red4ext.com) and the [REDmodding wiki](https://wiki.redmodding.org) communities, for game type references
+- Everyone who tested wheels and sent logs
 
 ## License
 
