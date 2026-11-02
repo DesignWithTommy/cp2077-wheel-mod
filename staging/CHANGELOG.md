@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.4.0
+- **Cyberpunk 2077 2.5:** built on the 2.5 RED4ext SDK; throttle/brake now write the 2.5 input fields (0x264 accel, 0x268 decel, 0x270 and 0x280 accel-minus-decel), measured from a keyboard W/S test. The old offsets froze the car or sent the brake into the wrong field.
+- **Burnout fix:** pedal and steering inverts were applied twice (wheel read, then frame build), so a G920 with Invert on sent full gas plus full brake at rest. They are applied once now.
+- The wheel owns gas/brake while connected, so G HUB-injected keys can't add phantom throttle.
+- Bind map no longer re-logs on every unchanged settings push; pedal, input-field and applied-settings debug lines (capped ~10 min) for diagnosing axis setups.
+
 ## 3.2.0 — 2026-05-25
 - **Steering Deadzone:** Added a new slider (0 to 5 degrees) to configure a deadzone in the center of the wheel.
 - **Spring Non-Linearity:** Added a new slider (0 to 100%) to make the centering spring force ramp up geometrically at small steering angles. Perfect for weaker wheels to feel the center better.

@@ -1,10 +1,16 @@
 # Direct Wheel — Moza & Direct Drive Racing Wheel Support for Cyberpunk 2077
 
-Full racing wheel support for Cyberpunk 2077 v2.31 with **force feedback**, **speed-sensitive steering compensation**, and **TweakDB steering physics overrides**.
+Full racing wheel support for **Cyberpunk 2077 v2.5** with **force feedback**, **speed-sensitive steering compensation**, and **TweakDB steering physics overrides**.
 
-Tested with **Moza R5**. Should work with any DirectInput-compatible wheel.
+Tested with **Moza R5** and **Logitech G920**. Should work with any DirectInput-compatible wheel.
 
-### 📥 [Download direct_wheel-3.2.0.zip](https://github.com/natpoh/cp2077-wheel-mod-moza/raw/main/dist/direct_wheel-3.2.0.zip)
+### 📥 [Download the latest release (3.4.0)](https://github.com/DesignWithTommy/cp2077-wheel-mod/releases/latest)
+
+### What's new in 3.4.0
+- **Cyberpunk 2077 2.5 support:** built on the 2.5 RED4ext SDK, and throttle/brake now write the game's 2.5 input fields. The 2.31 build froze the car or put the brake in the wrong place on 2.5.
+- **Burnout fix:** the Invert throttle/brake/steering settings were applied twice, so a wheel whose pedals need inverting (G920) sent full gas *and* full brake while idle. They're applied once now.
+- **No phantom throttle:** while the wheel is connected it owns gas and brake, so G HUB-injected keys can't add throttle.
+- Quieter logs, plus once-a-second pedal and applied-settings lines (first ~10 minutes) for checking an axis setup.
 
 ---
 
@@ -45,7 +51,7 @@ Tested with **Moza R5**. Should work with any DirectInput-compatible wheel.
 
 ## Requirements
 
-1. **Cyberpunk 2077 v2.31** (latest patch)
+1. **Cyberpunk 2077 v2.5**
 2. **[RED4ext](https://www.nexusmods.com/cyberpunk2077/mods/2380)** — native plugin loader
 3. **[Mod Settings](https://www.nexusmods.com/cyberpunk2077/mods/4885)** — in-game settings UI
 
@@ -55,7 +61,7 @@ Tested with **Moza R5**. Should work with any DirectInput-compatible wheel.
 
 ### Quick Install (zip)
 
-1. Download `direct_wheel-3.2.0.zip`
+1. Download `direct_wheel-3.4.0.zip` from [Releases](https://github.com/DesignWithTommy/cp2077-wheel-mod/releases/latest)
 2. Extract **directly into your Cyberpunk 2077 game folder**, for example:
    ```
    D:\SteamLibrary\steamapps\common\Cyberpunk 2077\
@@ -92,6 +98,8 @@ All settings are in-game: **Main Menu → Settings → Mod Settings → WHEEL MO
 | Speed steering boost (%) | 45 | Compensates steering at high speed. 0=off, 50=1.5x at 100 mph, 100=2x max |
 | Steering turn speed | 1 | Engine physics limit for turn speed. **For wheel play, set to 6+.** *(Requires game restart to apply)* |
 | Steering re-center speed | 1 | Engine physics limit for return-to-center speed. **For wheel play, set to 6+.** *(Requires game restart to apply)* |
+| Invert throttle / brake / clutch | OFF | Flip a pedal whose axis reads full when released. **Logitech G920: turn all three ON.** |
+| Invert steering | OFF | Flip steering direction |
 
 ### Axis Mapping Section
 
@@ -99,8 +107,10 @@ All settings are in-game: **Main Menu → Settings → Mod Settings → WHEEL MO
 |---|---|---|
 | Wheel device (0 = Auto) | 0 | Which controller to use for steering + FFB. 0 = auto-detect, 1..N = specific device by index |
 | Pedal device (0 = Same as wheel) | 0 | Separate USB pedal device for throttle/brake. 0 = use wheel device |
-| Throttle axis | lZ | DirectInput axis for throttle. Logitech = lZ, some Moza = lY |
-| Brake axis | lRz | DirectInput axis for brake |
+| Throttle axis | lZ | DirectInput axis for throttle. Logitech G29/G923 = lZ, **G920 = lY**, some Moza = lY |
+| Brake axis | lRz | DirectInput axis for brake (G920 = lRz) |
+
+> Settings take effect when you press **APPLY** in Mod Settings. To check a pedal setup, look for `[direct_wheel:pedal]` in `red4ext/logs/direct_wheel-*.log`: with your feet off the pedals it should read `thr=0.00 brk=0.00`.
 
 > To see which device is at which index, run `tools/input_probe.exe` — it lists all devices with numbers.
 
@@ -127,6 +137,9 @@ Decrease **Speed steering boost** (try 20–40%).
 
 ### FFB is too strong / too weak
 Adjust **FFB strength** first (overall), then tune individual effects.
+
+### The car does a burnout or creeps on its own
+Your pedal axes or inverts are wrong, so a released pedal reads as pressed. Check the `[direct_wheel:pedal]` log line (see above), fix the axis or invert, and press **APPLY**.
 
 ### Wheel doesn't respond at all
 1. Make sure **G HUB** (or LGS) is running
@@ -157,7 +170,9 @@ r6/scripts/direct_wheel/
 
 ## Credits
 
-- Forked from [cp2077-wheel-mod](https://github.com/clevergrant/cp2077-wheel-mod) by clevergrant
+- Original [cp2077-wheel-mod](https://github.com/clevergrant/cp2077-wheel-mod) by clevergrant
+- Moza / direct-drive features from [cp2077-wheel-mod-moza](https://github.com/natpoh/cp2077-wheel-mod-moza) by natpoh
+- 2.5 update and fixes by DesignWithTommy
 - RED4ext SDK by [WopsS](https://github.com/WopsS/RED4ext.SDK)
 - Cyber Engine Tweaks by [yamashi / maximegmd](https://github.com/maximegmd/CyberEngineTweaks)
 
