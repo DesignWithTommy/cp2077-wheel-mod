@@ -1,4 +1,6 @@
 #pragma once
+#include <windows.h>
+#include <cstring>
 
 // Dynamic, RTTI-resolved accessors for vehicle physics state.
 //
@@ -29,8 +31,8 @@ namespace direct_wheel::vehicle_ext
     namespace fallback
     {
         // Outer (vehicleBaseObject) — stable across 1.52 → 2.31.
-        inline constexpr std::ptrdiff_t kVehicleBaseObject_physics      = 0x2C8;
-        inline constexpr std::ptrdiff_t kVehicleBaseObject_physicsData  = 0x2D0;
+        inline constexpr std::ptrdiff_t kVehicleBaseObject_physics      = 0x2D0; // 2.5 (ChoomLink): 2.31 had 0x2C8, now a float
+        inline constexpr std::ptrdiff_t kVehicleBaseObject_physicsData  = 0x2D8; // 2.5: velocity read here matched the game speed (Nov 1 20:03)
 
         // PhysicsData (base Physics layout) — stable across 1.52 → 2.31.
         inline constexpr std::ptrdiff_t kPhysicsData_velocity           = 0x18;
@@ -56,18 +58,38 @@ namespace direct_wheel::vehicle_ext
     // them through the resolved offset. Can return nullptr if the vehicle's
     // physics chain isn't set up yet (brief window during mount).
 
+    // ChoomLink (2.5 port): the 2.31 fallback offsets point at non-pointer fields on 2.5 (a G920 crashed reading
+    // 0x3DCCCDE1, a float, as a pointer, on entering a car). Every read is SEH-guarded and a pointer must look like
+    // a heap pointer, so a wrong offset only turns the physics-based effects off instead of crashing the game.
+    inline bool SafeCopy(void* dst, const void* src, size_t n)
+    {
+        __try { memcpy(dst, src, n); return true; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
+
+    inline bool LooksLikePtr(const void* p)
+    {
+        const auto v = reinterpret_cast<uintptr_t>(p);
+        return v >= 0x10000000000ull && v < 0x7FFFFFFFFFFFull && (v & 7) == 0;
+    }
+
+    inline void* ReadPtrAt(void* vehicle, uint32_t off)
+    {
+        void* p = nullptr;
+        if (!vehicle || !SafeCopy(&p, static_cast<char*>(vehicle) + off, sizeof(p)) || !LooksLikePtr(p)) return nullptr;
+        return p;
+    }
+
     inline void* GetPhysicsRaw(void* vehicle)
     {
-        const uint32_t off = ResolvedOr(rtti_offsets::VehicleBaseObject_physicsOffset(),
-                                        fallback::kVehicleBaseObject_physics);
-        return *reinterpret_cast<void**>(static_cast<char*>(vehicle) + off);
+        return ReadPtrAt(vehicle, ResolvedOr(rtti_offsets::VehicleBaseObject_physicsOffset(),
+                                             fallback::kVehicleBaseObject_physics));
     }
 
     inline void* GetPhysicsDataRaw(void* vehicle)
     {
-        const uint32_t off = ResolvedOr(rtti_offsets::VehicleBaseObject_physicsDataOffset(),
-                                        fallback::kVehicleBaseObject_physicsData);
-        return *reinterpret_cast<void**>(static_cast<char*>(vehicle) + off);
+        return ReadPtrAt(vehicle, ResolvedOr(rtti_offsets::VehicleBaseObject_physicsDataOffset(),
+                                             fallback::kVehicleBaseObject_physicsData));
     }
 
     // --- PhysicsData scalar reads ------------------------------------------
@@ -80,9 +102,7 @@ namespace direct_wheel::vehicle_ext
         if (!pd) return false;
         const uint32_t off = ResolvedOr(rtti_offsets::PhysicsData_velocityOffset(),
                                         fallback::kPhysicsData_velocity);
-        const float* src = reinterpret_cast<const float*>(static_cast<char*>(pd) + off);
-        out[0] = src[0]; out[1] = src[1]; out[2] = src[2];
-        return true;
+        return SafeCopy(out, static_cast<char*>(pd) + off, 3 * sizeof(float));
     }
 
     inline bool ReadAngularVelocity(void* vehicle, float out[3])
@@ -91,9 +111,7 @@ namespace direct_wheel::vehicle_ext
         if (!pd) return false;
         const uint32_t off = ResolvedOr(rtti_offsets::PhysicsData_angularVelocityOffset(),
                                         fallback::kPhysicsData_angularVelocity);
-        const float* src = reinterpret_cast<const float*>(static_cast<char*>(pd) + off);
-        out[0] = src[0]; out[1] = src[1]; out[2] = src[2];
-        return true;
+        return SafeCopy(out, static_cast<char*>(pd) + off, 3 * sizeof(float));
     }
 
     // --- WheeledPhysics scalar reads ---------------------------------------
@@ -116,6 +134,8 @@ namespace direct_wheel::vehicle_ext
         const auto at = [&](uint32_t off) -> const char* {
             return static_cast<const char*>(wp) + off;
         };
+        char probe[0xC80];
+        if (!SafeCopy(probe, wp, sizeof(probe))) return s; // the whole range the reads below touch
         s.turnRate               = *reinterpret_cast<const float*>(at(ResolvedOr(
             rtti_offsets::WheeledPhysics_turnRateOffset(),
             fallback::kWheeledPhysics_turnRate)));

@@ -53,6 +53,15 @@ namespace direct_wheel::vehicle_hook
         namespace off
         {
             constexpr std::ptrdiff_t kInputSteer = 0x278; // float, [-1..1], += right
+            // 2.5 (ChoomLink), measured from a keyboard test Nov 1 21:08: W sets 0x264=1, 0x270=+1, 0x280=+1;
+            // S sets 0x268=1, 0x270=-1, 0x280=-1. The game's input reader (2.5 exe 0x1401bc1f3) writes 0x264 accel,
+            // 0x268 decel, 0x26C |handbrake|, 0x270 accel-decel, 0x278 steer; it never writes 0x2B4.
+            constexpr std::ptrdiff_t kInputThrottle = 0x264;
+            constexpr std::ptrdiff_t kInputBrake    = 0x268;
+            constexpr std::ptrdiff_t kInputDrive    = 0x270; // throttle - brake
+            // 0x280: W=+1, S=-1 from the keyboard (21:08). The burnout's output scales by it (disassembly of exe
+            // 0x1406ddc6c, static, not run); the wheel never wrote it, so the keyboard/G HUB value stayed.
+            constexpr std::ptrdiff_t kInputDrive2   = 0x280;
         }
 
         UpdateVehicleCameraInputFn g_original = nullptr;
@@ -542,15 +551,30 @@ namespace direct_wheel::vehicle_hook
                 // keyboard coexist — whichever source asks for more steer /
                 // throttle / brake wins, neither clobbers the other.
                 float* pSteer    = FloatFieldAt(self, off::kInputSteer);
-                float* pThrottle = &veh->acceleration;
-                float* pBrake    = &veh->deceleration;
+                float* pThrottle = FloatFieldAt(self, off::kInputThrottle);
+                float* pBrake    = FloatFieldAt(self, off::kInputBrake);
+                { // ChoomLink: the game's own input fields once a second (before ours), to prove the 2.5 offsets
+                    static ULONGLONG sLast = 0;
+                    static int sLines = 0;
+                    const ULONGLONG now = GetTickCount64();
+                    if (now - sLast >= 1000 && sLines < 600) { // ~10 min per game, not forever
+                        sLast = now; ++sLines;
+                        const float* f = reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(self) + 0x258);
+                        char buf[600]; int n = 0;
+                        for (int i = 0; i < 28 && n < 480; ++i)
+                            n += snprintf(buf + n, sizeof(buf) - n, " %X=%.2f", 0x258 + i * 4, f[i]);
+                        log::InfoF("[direct_wheel:input] vanilla%s", buf);
+                    }
+                }
 
                 if (std::fabs(wheelSteer) > std::fabs(*pSteer))
                     *pSteer = wheelSteer;
-                if (wheelThrottle > *pThrottle)
-                    *pThrottle = wheelThrottle;
-                if (wheelBrake > *pBrake)
-                    *pBrake = wheelBrake;
+                // ChoomLink: the wheel owns gas/brake while connected, so keyboard/gamepad input can't add to them.
+                // Added for a tester's burnout with G HUB on while these pedals read 0 (Nov 1 20:46); it did not stop it.
+                *pThrottle = wheelThrottle;
+                *pBrake = wheelBrake;
+                *FloatFieldAt(self, off::kInputDrive) = wheelThrottle - wheelBrake;
+                *FloatFieldAt(self, off::kInputDrive2) = wheelThrottle - wheelBrake;
 
                 const float steer    = *pSteer;
                 const float throttle = *pThrottle;
@@ -804,8 +828,8 @@ namespace direct_wheel::vehicle_hook
                     suspensionActivity,
                     lateralVelocityMps,
                     torqueSteer,
-                    veh->acceleration,  // post-merge throttle (0..1)
-                    veh->deceleration,  // post-merge brake (0..1)
+                    *FloatFieldAt(self, off::kInputThrottle),  // post-merge throttle (0..1)
+                    *FloatFieldAt(self, off::kInputBrake),  // post-merge brake (0..1)
                     veh->isReversing,
                     veh->isOnGround,
                     /*enabled*/       true,
@@ -888,6 +912,16 @@ namespace direct_wheel::vehicle_hook
         if (prev != p)
         {
             log::InfoF("[direct_wheel:hook] player vehicle changed: %p -> %p", prev, p);
+            if (p) // ChoomLink (2.5 port): the pointer-sized slots where 2.31 kept physics/physicsData, to find 2.5's
+            {
+                for (uint32_t off = 0x2A0; off < 0x320; off += 8)
+                {
+                    void* v = nullptr;
+                    direct_wheel::vehicle_ext::SafeCopy(&v, static_cast<char*>(p) + off, sizeof(v));
+                    log::InfoF("[direct_wheel:hook] vehicle +0x%03X = %p%s", off, v,
+                               direct_wheel::vehicle_ext::LooksLikePtr(v) ? " (pointer)" : "");
+                }
+            }
             // Reset the per-vehicle physics-logging latch so the next
             // vehicle's turnRate / wheelbase / etc. get dumped on first
             // tick. Also clear the per-car yaw reference and angular-

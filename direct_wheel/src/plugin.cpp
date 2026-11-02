@@ -42,9 +42,8 @@ namespace direct_wheel
             f.digital.buttons = s.buttons;
             f.digital.pov     = s.pov;
 
-            // Invert steering if configured (axis is -1..+1, center = 0).
-            if (config::Current().input.invertSteering)
-                f.axes.steer = -f.axes.steer;
+            // ChoomLink: inverts are applied once, in wheel.cpp ReadSnapshot. Applying them here too undid them:
+            // a G920 pedals read 0.00 there but reached the car as gas 1.00 + brake 1.00 (Nov 1 22:10), a burnout.
 
             // Apply deadzone
             float deadzonePct = config::Current().input.steeringDeadzoneDegrees / 450.0f; // Assume 900 deg wheel
@@ -57,12 +56,6 @@ namespace direct_wheel
                 float sign = f.axes.steer > 0.0f ? 1.0f : -1.0f;
                 f.axes.steer = sign * ((std::fabs(f.axes.steer) - deadzonePct) / (1.0f - deadzonePct));
             }
-
-            // Invert pedal logic if configured. 
-            if (config::Current().input.invertThrottle)
-                f.axes.throttle = 1.0f - f.axes.throttle;
-            if (config::Current().input.invertBrake)
-                f.axes.brake = 1.0f - f.axes.brake;
 
             // Clutch-as-brake: the G923's brake pedal is physically stiff; the
             // softer clutch pedal is easier to modulate. CP2077 has no manual

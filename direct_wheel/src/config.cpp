@@ -385,6 +385,14 @@ namespace direct_wheel::config
             st.publishedIdx.store(writeIdx, std::memory_order_release);
             ApplyDerived(next);
             SaveLocked(next);
+            { // ChoomLink: one line per real pedal-setting change (Push calls ~60 setters per apply)
+                char line[160];
+                snprintf(line, sizeof(line), "throttle=%s brake=%s clutch=%s invert thr=%d brk=%d clu=%d",
+                         next.axes.throttle.c_str(), next.axes.brake.c_str(), next.axes.clutch.c_str(),
+                         next.input.invertThrottle, next.input.invertBrake, next.input.invertClutch);
+                static std::string sLastApplied;
+                if (sLastApplied != line) { sLastApplied = line; log::InfoF("[direct_wheel] applied: %s", line); }
+            }
         }
 
         template <typename F>

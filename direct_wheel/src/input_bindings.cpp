@@ -800,6 +800,7 @@ namespace direct_wheel::input_bindings
         auto& st = S();
         {
             std::lock_guard lk(st.mtx);
+            if (st.bindings == bindings) return; // ChoomLink: unchanged pushes logged the map ~1000x/s (a tester's log)
             st.bindings = bindings;
         }
         // Dump the full binding map on any wholesale replacement so the log

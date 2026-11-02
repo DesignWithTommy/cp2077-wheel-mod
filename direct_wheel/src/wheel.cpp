@@ -828,6 +828,21 @@ void Pump() {
 
   s.brake = rawBrake;
   s.clutch = rawClutch;
+  { // ChoomLink: raw pedal values once a second, to tell an idle-pressed pedal from a real press
+    static ULONGLONG sLast = 0;
+    static int sLines = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - sLast >= 1000 && sLines < 600) { // ~10 min per game, not forever
+      sLast = now; ++sLines;
+      log::InfoF("[direct_wheel:pedal] raw thr=%ld brk=%ld clu=%ld -> thr=%.2f brk=%.2f clu=%.2f (inv %d/%d)",
+                 config::AxisMap::Read(jsPedals, axes.throttle), config::AxisMap::Read(jsPedals, axes.brake),
+                 config::AxisMap::Read(jsPedals, axes.clutch), s.throttle, s.brake, s.clutch,
+                 cfg.input.invertThrottle, cfg.input.invertBrake);
+      log::InfoF("[direct_wheel:pedal] all axes: lX=%ld lY=%ld lZ=%ld lRx=%ld lRy=%ld lRz=%ld slider0=%ld slider1=%ld",
+                 jsPedals.lX, jsPedals.lY, jsPedals.lZ, jsPedals.lRx, jsPedals.lRy, jsPedals.lRz,
+                 jsPedals.rglSlider[0], jsPedals.rglSlider[1]);
+    }
+  }
   s.pov = static_cast<uint16_t>(js.rgdwPOV[0] & 0xFFFF);
 
   uint64_t bits = 0;
