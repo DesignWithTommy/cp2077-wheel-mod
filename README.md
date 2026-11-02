@@ -4,7 +4,7 @@ Full racing wheel support for **Cyberpunk 2077 v2.5** with **force feedback**, *
 
 Tested with **Moza R5** and **Logitech G920**. Should work with any DirectInput-compatible wheel.
 
-### 📥 [Download the latest release (3.4.0)](https://github.com/DesignWithTommy/cp2077-wheel-mod/releases/latest)
+### 📥 [Download the latest release (3.4.1)](https://github.com/DesignWithTommy/cp2077-wheel-mod/releases/latest)
 
 ### What's new in 3.4.0
 - **Cyberpunk 2077 2.5 support:** built on the 2.5 RED4ext SDK, and throttle/brake now write the game's 2.5 input fields. The 2.31 build froze the car or put the brake in the wrong place on 2.5.
@@ -61,7 +61,7 @@ Tested with **Moza R5** and **Logitech G920**. Should work with any DirectInput-
 
 ### Quick Install (zip)
 
-1. Download `direct_wheel-3.4.0.zip` from [Releases](https://github.com/DesignWithTommy/cp2077-wheel-mod/releases/latest)
+1. Download `direct_wheel-3.4.1.zip` from [Releases](https://github.com/DesignWithTommy/cp2077-wheel-mod/releases/latest)
 2. Extract **directly into your Cyberpunk 2077 game folder**, for example:
    ```
    D:\SteamLibrary\steamapps\common\Cyberpunk 2077\

@@ -53,7 +53,7 @@ namespace direct_wheel::vehicle_hook
         namespace off
         {
             constexpr std::ptrdiff_t kInputSteer = 0x278; // float, [-1..1], += right
-            // 2.5 (ChoomLink), measured from a keyboard test Nov 1 21:08: W sets 0x264=1, 0x270=+1, 0x280=+1;
+            // 2.5 (ChoomLink), measured from a tester's keyboard Nov 1 21:08: W sets 0x264=1, 0x270=+1, 0x280=+1;
             // S sets 0x268=1, 0x270=-1, 0x280=-1. The game's input reader (2.5 exe 0x1401bc1f3) writes 0x264 accel,
             // 0x268 decel, 0x26C |handbrake|, 0x270 accel-decel, 0x278 steer; it never writes 0x2B4.
             constexpr std::ptrdiff_t kInputThrottle = 0x264;
@@ -569,12 +569,14 @@ namespace direct_wheel::vehicle_hook
 
                 if (std::fabs(wheelSteer) > std::fabs(*pSteer))
                     *pSteer = wheelSteer;
-                // ChoomLink: the wheel owns gas/brake while connected, so keyboard/gamepad input can't add to them.
-                // Added for a tester's burnout with G HUB on while these pedals read 0 (Nov 1 20:46); it did not stop it.
-                *pThrottle = wheelThrottle;
-                *pBrake = wheelBrake;
-                *FloatFieldAt(self, off::kInputDrive) = wheelThrottle - wheelBrake;
-                *FloatFieldAt(self, off::kInputDrive2) = wheelThrottle - wheelBrake;
+                // ChoomLink: wheel and keyboard/gamepad merge (the larger wins), as upstream did. A wheel-only
+                // lockout broke both wheel and keys for a tester; it never stopped the burnout (the double invert did).
+                if (wheelThrottle > *pThrottle)
+                    *pThrottle = wheelThrottle;
+                if (wheelBrake > *pBrake)
+                    *pBrake = wheelBrake;
+                *FloatFieldAt(self, off::kInputDrive) = *pThrottle - *pBrake;
+                *FloatFieldAt(self, off::kInputDrive2) = *pThrottle - *pBrake;
 
                 const float steer    = *pSteer;
                 const float throttle = *pThrottle;

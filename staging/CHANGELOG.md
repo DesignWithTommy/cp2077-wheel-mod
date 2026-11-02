@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.4.1
+- **Keyboard works with the wheel again:** 3.4.0 let only the wheel drive gas/brake; wheel and keyboard/gamepad now merge (the larger wins), as before.
+- **Wheel sending no data:** if every axis reads exactly 32767 (G HUB connected but no reports), the wheel adds no input instead of half gas plus half brake, and the log warns `wheel sends no data` every 30 s.
+
 ## 3.4.0
 - **Cyberpunk 2077 2.5:** built on the 2.5 RED4ext SDK; throttle/brake now write the 2.5 input fields (0x264 accel, 0x268 decel, 0x270 and 0x280 accel-minus-decel), measured from a keyboard W/S test. The old offsets froze the car or sent the brake into the wrong field.
 - **Burnout fix:** pedal and steering inverts were applied twice (wheel read, then frame build), so a G920 with Invert on sent full gas plus full brake at rest. They are applied once now.
